@@ -3,7 +3,7 @@
 > A library to create proxy variables for remote python objects in [Ray](https://docs.ray.io/en/latest/index.html)
 > ecosystem.
 
-In python, multiprocessing and remote function calls are tedeous stuff to work with for leveraging multiple machine
+In python, multiprocessing and remote function calls are cumbersome stuff to work with for leveraging multiple machine
 resources.
 Although this pain is greatly mitigated by Ray, The need of creating an Actor class for each stateful task in ray
 ecosystem makes it hard to write multi-machine codes seamlessly and interactively.
