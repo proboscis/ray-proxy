@@ -15,5 +15,4 @@ jobs:
     - uses: actions/checkout@v2
     - name: Run test-ray-proxy
       run: |
-        sudo apt install -y sbcl
-        make test-ray-proxy
+        cd tests; pytest
