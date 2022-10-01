@@ -1,13 +1,12 @@
 # Ray-Proxy
 
-> A mini library to create proxy variables for remote python objects in [Ray](https://docs.ray.io/en/latest/index.html)
+> A library to create proxy variables for remote python objects in [Ray](https://docs.ray.io/en/latest/index.html)
 > ecosystem.
 
 In python, multiprocessing and remote function calls are tedeous stuff to work with for leveraging multiple machine
 resources.
 Although this pain is greatly mitigated by Ray, The need of creating an Actor class for each stateful task in ray
-ecosystem makes it hard to
-write multi-machine codes seamlessly and interactively.
+ecosystem makes it hard to write multi-machine codes seamlessly and interactively.
 This library aims to make it possible to write multi-machine code as seamless as writing a simple function in
 interactive jupyter notebook.
 
@@ -35,10 +34,22 @@ assert nx == "xxxxxxxxxx" == x * 10  # this is realized by calling remote __bool
 assert f(x) == "xx"  # you can call the remote function directly.
 assert x.fetch() == "x"  # calling fetch() on Var will retrieve the remote variable
 assert f(x).fetch() == f(x) == x * 2 == "xx"
+```
+## __getitem__/__setitem__
+```python
+d = env.put(dict(a=0))
+assert d['a'] == 0
+d['b'] = 15
+print(d['a']) # Var@cpu-server[abcde]:0
+print(d['b']) # Var@cpu-server[abcde]:15
+```
+## Remote Generator
+```python
 # actually we can iterate over remote variable like so:
 for item in nx: # Var@cpu-server[abcde]:"xxxxxxxxxx"  
     print(item) # Var@cpu-server[abcde]:"x"  
 
+a,b,c = ray.put(range(3)) # this works since remote generator works.
 ```
 
 ## GPU example
@@ -60,7 +71,7 @@ r_x.cpu().fetch() # always works.
 ```
 
 When interactively building a python program which requires a long start up preparation, such as loading large GPU model,
-This library can help you to do so without reinitializing the python interpreter when you make changes.
+this library can help you to work with it without reinitializing the python interpreter when you make changes.
 
 ## Multi interpreter example
 ```python
@@ -82,6 +93,8 @@ assert y.env.id == x1.env.id # y now lives in x1's environment because x1 has __
 # note that if x1 doesn' have __add__ operator, then __radd__ of x2 will be called and y will live in x2's environment.
 # we prioritize uploading local variable rather than downloading remote object.
 ```
+This allows creation of multiple gpu enabled environment creation on multiple ray nodes, and efficiently connecting them together.
+This is especially the case when you have multiple tasks that requires models placed on GPU and takes a lot of time to load parameters.
 
 # Installation
 > on Macbook with Apple Silicon, please install grpcio from conda after installing ray-proxy.
@@ -89,3 +102,30 @@ assert y.env.id == x1.env.id # y now lives in x1's environment because x1 has __
 pip install ray-proxy
 ```
 If you see symbol not found... error from protbuf, downgrade protobuf to 3.20.1. see [here](https://github.com/protocolbuffers/protobuf/issues/10571)
+
+# Notes
+## Asynchronous Call and Synchronous Call
+Most of the calls on Var object is done asynchronously through ray's actor system.
+Some operators such as __bool__, __repr__, __str__, __type__ and __len__ are synchronous and returns local variable by calling fetch() interanally.
+```python
+x = env.put([[[[0]]]])
+value = x[0][0][0][0] # queries successive asynchronous remote variable access. 
+print(value) # synchronously calls __str__ for printing remote __str__ call result.
+```
+# Overhead
+Each invocation of operator on Var object requires 1~ ray.remote calls under the hood.
+
+# Automatic unwrapping on remote function
+When you call a remote function with some parameters, the parameters get automatically unwrapped from Var on remote side.
+```python
+def test_remote_func(a:int,b:str,c:float):
+    assert isinstance(a,int)
+    assert isinstance(b,str)
+    assert isinstance(c,float)
+a,b,c = env.put((0,"b",1.0))
+r_func = env.put(test_remote_func)
+r_func(a,b,c) # works fine. a,b,c gets automatically unwrapped at the time they get passed to this function remotely.
+c2 = env2.put(2.5) # var at different env works fine too.
+r_func(a,b,c2) # this is done by automatically calling c2.fetch() on r_func's env.
+r_func(0,'x',c2) # local variable and remote variable can be used at the same time.
+```
