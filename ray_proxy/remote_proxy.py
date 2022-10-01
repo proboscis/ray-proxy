@@ -117,13 +117,13 @@ class Var:
         return self.env.iter_of_id(self.id)
 
     def __del__(self):
-        print(f"dereferencing")
+        # print(f"dereferencing")
         # logger.info(f"dereferencing:{self.id}")
         if not self.released:
             self.env.decr_ref(self.id)
             print(f"decr_ref:{self.id}")
             atexit.unregister(self.__atexit__)
-        print(f"dereferencing done")
+        # print(f"dereferencing done")
 
     def __dir__(self) -> Iterable[str]:
         _dir = self.env.dir_of_id(self.id)
@@ -215,13 +215,13 @@ def rp_serializer(rp: Var):
 # None of __getstate__ __setstate__ __reduce__ worked for serialization. this register_serializer is my last hope!
 def register_rp_serializer():
     # THIS WORKED!?
-    from loguru import logger
-    print(f"trying to register a serializer for Var object for the ray serializer")
+    # from loguru import logger
+    # print(f"trying to register a serializer for Var object for the ray serializer")
 
     ray.util.register_serializer(
         Var, serializer=rp_serializer, deserializer=rp_deserializer
     )
-    logger.info("successfully registered Var serializer!")
+    # logger.info("successfully registered Var serializer!")
 
 
 register_rp_serializer()

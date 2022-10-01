@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Union, Any
 
-import pandas as pd
 import ray
 from ray import ObjectRef
 from ray.actor import ActorHandle
@@ -234,7 +233,7 @@ class PyInterpreter:
                 type=type(self.instances[k]),
                 refs=self.ref_counts[k]
             ))
-        return pd.DataFrame(res)
+        return res
 
     def put_named(self, item, name: str):
         from loguru import logger
