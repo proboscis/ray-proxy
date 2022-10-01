@@ -63,13 +63,12 @@ class PyInterpreter:
             else:
                 logger.warning(f"fetching from a proxy which lives in different env:{eid}")
                 return proxy.fetch()
-        match proxy:
-            case tuple():
-                return tuple(self._unwrap(item) for item in proxy)
-            case list():
-                return [self._unwrap(item) for item in proxy]
-            case dict():
-                return {self._unwrap(key): self._unwrap(value) for key, value in proxy.items()}
+        if isinstance(proxy, tuple):
+            return tuple(self._unwrap(item) for item in proxy)
+        if isinstance(proxy, list):
+            return [self._unwrap(item) for item in proxy]
+        if isinstance(proxy, dict):
+            return {self._unwrap(key): self._unwrap(value) for key, value in proxy.items()}
 
         return proxy
 
@@ -271,8 +270,7 @@ class PyInterpreter:
         return list(self.named_instances.keys())
 
     def __contains__(self, item: Union[str, uuid.UUID]):
-        match item:
-            case str():
-                return item in self.named_instances
-            case uuid.UUID():
-                return item in self.instances
+        if isinstance(item, str):
+            return item in self.named_instances
+        if isinstance(item, uuid.UUID):
+            return item in self.instances

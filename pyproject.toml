@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ray-proxy"
-version = "0.1.5"
+version = "0.1.6"
 description = "A library which enables the creation of proxy variables for remote python interpreter in ray cluster."
 authors = ["proboscis <nameissoap@gmail.com>"]
 packages = [{ include = "ray_proxy" }]
