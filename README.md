@@ -3,7 +3,7 @@
 > A library to create proxy variables for remote python objects in [Ray](https://docs.ray.io/en/latest/index.html)
 > ecosystem.
 
-In python, multiprocessing and remote function calls are tedeous stuff to work with for leveraging multiple machine
+In python, multiprocessing and remote function calls are cumbersome stuff to work with for leveraging multiple machine
 resources.
 Although this pain is greatly mitigated by Ray, The need of creating an Actor class for each stateful task in ray
 ecosystem makes it hard to write multi-machine codes seamlessly and interactively.
@@ -16,7 +16,7 @@ Here are some examples of what you can do with ray-proxy.
 import ray
 from ray_proxy import RemoteInterpreterFactory, IRemoteInterpreter, Var
 
-ray.init()  # connect to your ray culuster if you have one, otherwise ray will create a local one.
+ray.init()  # connect to your ray cluster if you have one, otherwise ray will create a local one.
 rif = RemoteInterpreterFactory(ray)
 env: IRemoteInterpreter = rif.create(num_cpus=1)  # this will create a remote ray actor that holds any python objects
 # we can send any serializable python object to remote side.
