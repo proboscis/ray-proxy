@@ -13,7 +13,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
-    - name: Run test-blc
+    - name: Run test-ray-proxy
       run: |
         sudo apt install -y sbcl
-        make test-blc
+        make test-ray-proxy
