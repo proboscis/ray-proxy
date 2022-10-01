@@ -16,7 +16,7 @@ Here are some examples of what you can do with ray-proxy.
 import ray
 from ray_proxy import RemoteInterpreterFactory, IRemoteInterpreter, Var
 
-ray.init()  # connect to your ray culuster if you have one, otherwise ray will create a local one.
+ray.init()  # connect to your ray cluster if you have one, otherwise ray will create a local one.
 rif = RemoteInterpreterFactory(ray)
 env: IRemoteInterpreter = rif.create(num_cpus=1)  # this will create a remote ray actor that holds any python objects
 # we can send any serializable python object to remote side.
