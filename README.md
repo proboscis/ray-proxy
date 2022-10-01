@@ -128,4 +128,8 @@ r_func(a,b,c) # works fine. a,b,c gets automatically unwrapped at the time they 
 c2 = env2.put(2.5) # var at different env works fine too.
 r_func(a,b,c2) # this is done by automatically calling c2.fetch() on r_func's env.
 r_func(0,'x',c2) # local variable and remote variable can be used at the same time.
+# it is also valid to put and call at the same line.
+env.put(test_remote_func)(a,b,c)
+assert env.put(type)(a) == int 
+
 ```
