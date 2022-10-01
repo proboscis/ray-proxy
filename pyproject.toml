@@ -8,9 +8,9 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.7"
 ray = "^2.0.0"
-bidict = "*"
-returns = "*"
-loguru = "*"
+loguru = "^0.6.0"
+bidict = "^0.22.0"
+returns = "^0.19.0"
 
 
 [tool.poetry.dev-dependencies]
