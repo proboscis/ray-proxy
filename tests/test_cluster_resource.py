@@ -4,7 +4,7 @@ import time
 import ray
 
 from ray_proxy.cluster_resource import ClusterTaskScheduler, LambdaResourceFactory, ReservedScope, ClusterTask, \
-    LambdaClusterTask, OnDemandScope
+    LambdaClusterTask, OnDemandScope, RemoteTaskScheduler
 
 
 class A:
@@ -24,29 +24,19 @@ def test_register_resource_factory():
     gpu_fac = LambdaResourceFactory(dict(), lambda res: 1, remaining=6)
     env_fac = LambdaResourceFactory(dict(gpu=1), lambda res: "env", remaining=3)
     harmonizer_fac = LambdaResourceFactory(dict(env=1),lambda res: "harmonizer", remaining=100)
-    scheduler = ray.remote(ClusterTaskScheduler).remote()
-
-    def register(name, factory, scope=ReservedScope()):
-        ray.get(scheduler.register_resource_factory.remote(
-            name, factory, scope
-        ))
-
-    register("a", a_fac)
-    register("gpu", gpu_fac)
-    register("env", env_fac)
-    register("harmonizer",harmonizer_fac,OnDemandScope())
-    ray.get(scheduler.start.remote())
-
-    lct = LambdaClusterTask(dict(a=1, gpu=1), task)
-    env_task = LambdaClusterTask(dict(env=1), task)
-    harm_task = LambdaClusterTask(dict(harmonizer=1),task)
+    sch = RemoteTaskScheduler.create(dict(
+        a = (a_fac,ReservedScope()),
+        gpu = (gpu_fac,ReservedScope()),
+        env = (env_fac,ReservedScope()),
+        harmonizer = (harmonizer_fac,OnDemandScope()),
+    ))
     results = []
     for i in range(10):
-        results.append(scheduler.schedule_task.remote(lct))
-        results.append(scheduler.schedule_task.remote(env_task))
-        results.append(scheduler.schedule_task.remote(harm_task))
+        results.append(sch.submit(dict(a=1,gpu=1),task))
+        results.append(sch.submit(dict(gpu=1),task))
+        results.append(sch.submit(dict(harmonizer=1),task))
     print(ray.get(results))
-    print(ray.get(scheduler.status.remote()))
+    print(sch.status())
 
     # I dont know the semantics of on_demand_resources and reserved_resources
     # reserved_resources are created upon creation

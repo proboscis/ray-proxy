@@ -4,11 +4,12 @@ from abc import ABC, abstractmethod
 from asyncio import Event, Future, Task
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Generic, TypeVar, Dict, Union, Set, Callable, Awaitable, Any
+from typing import List, Generic, TypeVar, Dict, Union, Set, Callable, Awaitable, Any, Tuple
 
 import ray
 from expression import Result
 from ray import ObjectRef
+from ray.actor import ActorHandle
 
 T = TypeVar("T")
 
@@ -30,7 +31,7 @@ class IResourceHandle(Generic[T], ABC):
 
     @property
     @abstractmethod
-    def consuming_resources(self)->Dict[str,List["IResourceHandle"]]:
+    def consuming_resources(self) -> Dict[str, List["IResourceHandle"]]:
         pass
 
 
@@ -58,7 +59,6 @@ class LambdaResourceHandle(IResourceHandle[T]):
     @property
     def consuming_resources(self) -> Resources:
         return self._consuming_resources
-
 
 
 @dataclass
@@ -141,7 +141,7 @@ class LambdaResourceFactory(IResourceFactory[T]):
     def required_resources(self):
         return self._required_resources
 
-    def _destructor(self, value:T):
+    def _destructor(self, value: T):
         self.destructor(value)
         self.remaining += 1
 
@@ -186,14 +186,14 @@ class ClusterTaskScheduler:
         resource_counts = {k: len(v) for k, v in self.resource_pool.items()}
         num_availables = {k: v.num_available() for k, v in self.resource_sources.items()}
         import pandas as pd
-        return pd.DataFrame([resource_counts,self.resource_in_use_count,num_availables],index=["in_pool","in_use","issuable"])
-
-
+        return pd.DataFrame([resource_counts, self.resource_in_use_count, num_availables],
+                            index=["in_pool", "in_use", "issuable"])
 
     def register_resource_factory(self, key, factory, scope):
         self.resource_sources[key] = factory
         self.resource_scopes[key] = scope
         self.resource_pool[key] = []
+        self.resource_in_use_count[key] = 0
 
     def find_missing_resources(self, reqs: Dict[str, int]):
         resource_counts = {k: len(v) for k, v in self.resource_pool.items()}
@@ -278,7 +278,7 @@ class ClusterTaskScheduler:
             self._free_resources(used_resources)
             self.reschedule_event.set()
 
-    def _free_resources(self,used_resources:Resources):
+    def _free_resources(self, used_resources: Resources):
         for key, resources in used_resources.items():
             for r in resources:
                 if not self.resource_scopes[key].to_keep(r):
@@ -315,8 +315,24 @@ class ClusterTaskScheduler:
             self.reschedule_event.clear()
 
 
-
 @dataclass
-class TaskResult:
-    id: uuid.UUID
-    value: Result
+class RemoteTaskScheduler:
+    actor: ActorHandle
+
+    @staticmethod
+    def create(factories: Dict[str, Tuple[IResourceFactory, ResourceScope]]) -> "RemoteTaskScheduler":
+        actor = ray.remote(ClusterTaskScheduler).remote()
+        sch = RemoteTaskScheduler(actor)
+        for key, (fac, scope) in factories.items():
+            sch.add_factory(key, fac, scope)
+        ray.get(actor.start.remote())
+        return sch
+
+    def add_factory(self, name, factory: IResourceFactory, scope: ResourceScope):
+        return ray.get(self.actor.register_resource_factory.remote(name, factory, scope))
+
+    def submit(self, resources: Dict[str, int], task):
+        return self.actor.schedule_task.remote(LambdaClusterTask(resources, task))
+
+    def status(self):
+        return ray.get(self.actor.status.remote())
