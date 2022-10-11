@@ -1,6 +1,6 @@
 import atexit
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Generic, TypeVar
 
 import ray
 from ray import ObjectRef
@@ -8,11 +8,12 @@ from ray.actor import ActorHandle
 from ray.exceptions import RayTaskError
 from ray.util.queue import Queue
 
+from ray_proxy.ast import Object, Expr, Call, Attr
 from ray_proxy.interface import IRemoteInterpreter
 
-
+T = TypeVar("T")
 @dataclass
-class Var:
+class Var(Generic[T]):
     """
     a proxy class that represents a variable which lives in the remote python interpreter.
     this, can be copied and used from multiple remote places if I implemnt the corrent reference counting mechanism!
@@ -78,6 +79,11 @@ class Var:
             raise AttributeError(item)
         if item == "__remote_class__":
             return self._remote_attr("__class__")
+        # ah, since some libraries expects AttributeError to be raised immidiately, so we need to block for the remote value.
+
+        if not item.startswith("__") and not item.startswith("_repr_"):
+            # special functions and repr functions needs special care.
+            return self._remote_attr(item)
         if self.___proxy_dirs___ is None:
             self.___proxy_dirs___ = set(self.__dir__())
         if item.startswith("_") and item not in self.___proxy_dirs___:
@@ -136,7 +142,6 @@ class Var:
         # return self._proxy(self.remote_env.call_method_id.remote(self.id, method, args, kwargs))
 
     def ___call_operator___(self, operator, *args):
-        args = [self.env.put_if_needed(a) for a in args]
         return self.env.operator_call_id(self.id, operator, args)
 
     def ___call_left_operator___(self, operator, arg):
