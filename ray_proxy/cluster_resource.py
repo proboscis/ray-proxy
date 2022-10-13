@@ -165,7 +165,7 @@ class LambdaResourceFactory(IResourceFactory[T]):
     _required_resources: Dict[str, int]
     _factory: Callable[[Resources, ThreadPoolExecutor], Awaitable[T]]
     remaining: int  # TODO move this state to scheduler
-    destructor: Callable[[T], None] = field(default=lambda x: None)
+    destructor: Optional[Callable[[T], None]] = field(default=None)
 
     async def create(self, resources: Resources, executor: ThreadPoolExecutor) -> IResourceHandle[T]:
         value = await self._factory(resources, executor)
@@ -184,7 +184,8 @@ class LambdaResourceFactory(IResourceFactory[T]):
         return self._required_resources
 
     def _destructor(self, value: T):
-        self.destructor(value)
+        if self.destructor is not None:
+            self.destructor(value)
 
 
 class ResourceScope(ABC):
@@ -218,7 +219,7 @@ class ClusterTaskScheduler:
     resource_in_use_count: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
     # TODO combined these states into single dataclass
     job_queue: List[QueuedTask] = field(default_factory=list)
-    background_tasks: Set[Task] = field(default_factory=set)
+    background_internal_tasks: Set[Task] = field(default_factory=set)
     running_tasks: Set[Task] = field(default_factory=set)
     last_task_submission_time: datetime = field(default=None)
 
@@ -244,7 +245,7 @@ class ClusterTaskScheduler:
             resource_sources=self.resource_sources,
             resource_in_use_count=self.resource_in_use_count,
             job_queue=[repr(t) for t in self.job_queue],
-            background_tasks=[repr(t) for t in self.background_tasks],
+            background_tasks=[repr(t) for t in self.background_internal_tasks],
             last_task_submission_time=self.last_task_submission_time,
         )
 
@@ -471,7 +472,7 @@ class ClusterTaskScheduler:
 
     def run_background(self, task: Coroutine, group: set = None) -> Task:
         if group is None:
-            group = self.background_tasks
+            group = self.background_internal_tasks
         _task = asyncio.create_task(task)
         group.add(_task)
         _task.add_done_callback(group.discard)
@@ -516,7 +517,7 @@ class ClusterTaskScheduler:
             self.reschedule_event.clear()
 
     def __repr__(self):
-        return f"ClusterTaskScheduler({len(self.background_tasks)}/{len(self.job_queue)})"
+        return f"ClusterTaskScheduler({len(self.running_tasks)}/{len(self.job_queue)})"
 
     def free_pool(self, key, amt, manual_destructor: Optional[Callable[[IResourceHandle], None]] = None):
         pool = self.resource_pool[key]
