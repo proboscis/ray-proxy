@@ -180,6 +180,11 @@ class PyInterpreter:
         item = self._unwrap(item)
         return self.register(self.instances[id][item])
 
+    def setitem_of_id(self, id, item, value):
+        item, value = self._unwrap(item), self._unwrap(value)
+        self.instances[id][item] = value
+        return self.register(None)
+
     def dir_of_id(self, id):
         res = dir(self.instances[id])
         return res

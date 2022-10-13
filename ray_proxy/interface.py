@@ -94,6 +94,9 @@ class IRemoteInterpreter(metaclass=ABCMeta):
     def getitem_id(self, id, item):
         """calls __getitem__ on the id-associated object"""
         pass
+    @abstractmethod
+    def setitem_id(self, id, item, value):
+        pass
 
     @abstractmethod
     def dir_of_id(self, id):

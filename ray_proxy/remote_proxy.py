@@ -8,10 +8,11 @@ from ray.actor import ActorHandle
 from ray.exceptions import RayTaskError
 from ray.util.queue import Queue
 
-from ray_proxy.ast import Object, Expr, Call, Attr
 from ray_proxy.interface import IRemoteInterpreter
 
 T = TypeVar("T")
+
+
 @dataclass
 class Var(Generic[T]):
     """
@@ -118,6 +119,9 @@ class Var(Generic[T]):
 
     def __getitem__(self, item):
         return self.env.getitem_id(self.id, item)
+
+    def __setitem__(self, item, value):
+        return self.env.setitem_id(self.id, item, value)
 
     def __iter__(self):
         return self.env.iter_of_id(self.id)

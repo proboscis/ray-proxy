@@ -18,7 +18,7 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
     remote_env: ActorHandle
     remote_env_refs: ActorHandle = field(default=None)
     remote_env_id_ref: ObjectRef = field(default=None)
-    remote_env_id:UUID = field(default=None)
+    remote_env_id: UUID = field(default=None)
 
     def __post_init__(self):
         if self.remote_env_id_ref is None:
@@ -106,6 +106,9 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
 
     def getitem_id(self, id, item) -> Var:
         return self.proxy(self.remote_env.getitem_of_id.remote(id, item))
+
+    def setitem_id(self, id, item, value) -> Var:
+        return self.proxy(self.remote_env.setitem_of_id.remote(id, item, value))
 
     def dir_of_id(self, id) -> List[str]:
         return ray.get(self.remote_env.dir_of_id.remote(id))
