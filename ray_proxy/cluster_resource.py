@@ -12,9 +12,6 @@ from typing import List, Generic, TypeVar, Dict, Union, Set, Callable, Awaitable
 import pandas as pd
 import ray
 from ray.actor import ActorHandle
-from returns.future import FutureResult, future_safe, FutureFailure
-from returns.pipeline import is_successful
-from returns.primitives.tracing import collect_traces
 from returns.result import Failure
 
 from pinject_design import Injected
@@ -284,7 +281,7 @@ class ClusterTaskScheduler:
         # print(f"resource count: {resource_counts}")
         return {k: v for k, v in resource_counts.items() if v < 0}
 
-    def _get_resource(self, reqs: Dict[str, int]) -> FutureResult:
+    def _get_resource(self, reqs: Dict[str, int]) -> Task:
         """
         obtain resources in blocking manner.
         resource number calculation is done in this thread
@@ -301,61 +298,65 @@ class ClusterTaskScheduler:
 
         # these complicated implementation here is to let the resource allocated as a task without waiting.
         # can I do this without this complication?
-        @future_safe
+
         async def pure(x):
             return x
 
-        @future_safe
-        async def get_dict(keys, tasks: List[FutureResult]):
+        async def get_dict(keys, tasks: List[Task]):
             vals = await asyncio.gather(*tasks)
-            return dict(zip(keys, [v.unwrap() for v in vals]))
+            return dict(zip(keys, vals))
 
-        def resolve_request(req: dict) -> FutureResult:
+        def resolve_request(req: dict) -> Task:
             keys, nums = req.keys(), req.values()
             tasks = []
             for key, amt in zip(keys, nums):
                 tasks.append(resolve(key, amt))
-            return get_dict(keys, tasks)
+            return self.run_background(get_dict(keys, tasks))
 
-        @future_safe
-        async def retrieve_resource(fac: IResourceFactory, resource_task: FutureResult) -> IResourceHandle:
+        async def retrieve_resource(fac: IResourceFactory, resource_task: Task) -> IResourceHandle:
             res = await resource_task
             # TODO avoid making resource on remote to prevent resource leakage.
             # TODO awaiting the resource creation here caused resource leak.
             try:
-                return await fac.create(res.unwrap(), self.resource_creation_executor)
+                return await fac.create(res, self.resource_creation_executor)
             except Exception as e:
                 fac: LambdaResourceFactory
                 fac.remaining += 1
                 raise e
 
-        def get_resource_background(fac) -> FutureResult:
+        def get_resource_background(fac) -> Task:
             resource_task: Task = resolve_request(fac.required_resources)
             fac: LambdaResourceFactory
             fac.remaining -= 1
-            # return self.run_background(retrieve_resource(fac, resource_task))
-            return retrieve_resource(fac, resource_task)
+            return self.run_background(retrieve_resource(fac, resource_task))
 
-        @future_safe
-        async def wait_all_tasks(tasks: List[FutureResult], res_key):
-            resource_results = await asyncio.gather(*tasks)
-            succeeded = [s for s in resource_results if is_successful(s)]
-            failures = [f for f in resource_results if not is_successful(f)]
+        async def to_coro(task):
+            return await task
+
+        async def wait_all_tasks(tasks, res_key, amt):
+            failures = []
+            succeeded = []
+            for t in tasks:
+                try:
+                    res: IResourceHandle = await t
+                    succeeded.append(res)
+                except Exception as e:
+                    f = Failure(e)
+                    failures.append(f)
             if failures:
                 for r in succeeded:
-                    self.free_single_resource(res_key, r.unwrap())
+                    self.free_single_resource(res_key, r)
                 self.resource_in_use_count[res_key] -= len(failures)
                 for f in failures:
-                    print(f.trace)
-                raise RuntimeError(
-                    f"could not allocate {len(failures)}/{len(resource_results)} resources ({res_key}). failures:{failures}")
+                    f:Failure
+                    f.unwrap()
+                raise RuntimeError(f"could not allocate requested {amt} resource ({res_key}) for task: {failures}")
             return succeeded
 
-        def resolve(key: str, amt: int) -> FutureResult:
+        def resolve(key: str, amt: int) -> Task:
             self.resource_in_use_count[key] += amt
             pool = self.resource_pool[key]
-            obtained: List[FutureResult] = [pure(x) for x in pool[:amt]]
-
+            obtained = [self.run_background(pure(x)) for x in pool[:amt]]
             self.resource_pool[key] = pool[len(obtained):]
             missing = max(0, amt - len(obtained))
 
@@ -364,13 +365,13 @@ class ClusterTaskScheduler:
                 # create a task to create a missing things
                 resource_task = get_resource_background(fac)
                 obtained.append(resource_task)
-            return wait_all_tasks(obtained, key)
+            return self.run_background(wait_all_tasks(obtained, key, amt))
 
         return resolve_request(reqs)
 
     async def get_resource(self, req: Dict[str, int]) -> Resources:
         """this is for external use."""
-        return (await self._get_resource(req)).unwrap()
+        return await(self._get_resource(req))
 
     async def start(self):
         if self.scheduling_task is None:
@@ -473,11 +474,12 @@ class ClusterTaskScheduler:
         _task.add_done_callback(group.discard)
         return _task
 
-    async def invoke_task(self, item, resources_task:FutureResult):
+    async def invoke_task(self, item, resources_task):
         resource = None
         try:
             resource = await resources_task
-            result = await item.task.run(resource.unwrap())
+            # TODO free failed resource allocations
+            result = await item.task.run(resource)
             item.future.set_result(result)
         except Exception as e:
             item.future.set_exception(e)
@@ -486,7 +488,6 @@ class ClusterTaskScheduler:
                 print(f"freeing resources")
                 self.free_resources(resource)
             self.reschedule_event.set()
-
 
     async def _schedule_loop(self):
         print(f"cluster task scheduler started")
@@ -499,7 +500,7 @@ class ClusterTaskScheduler:
             for item in self.job_queue:
                 if not self.find_missing_resources(item.task.required_resources):
                     print(f"_______________resource allocation_________________")
-                    resources_task:FutureResult = self._get_resource(item.task.required_resources)
+                    resources_task = self._get_resource(item.task.required_resources)
                     print(self.status())
                     print(f"_______________resource allocation done________________")
                     self.run_background(self.invoke_task(item, resources_task), self.running_tasks)
