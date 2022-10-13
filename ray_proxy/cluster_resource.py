@@ -341,16 +341,19 @@ class ClusterTaskScheduler:
                     res: IResourceHandle = await t
                     succeeded.append(res)
                 except Exception as e:
-                    f = Failure(e)
-                    failures.append(f)
+                    import traceback
+                    traceback_str = ray._private.utils.format_error_message(traceback.format_exc())
+                    failures.append((e,traceback_str))
             if failures:
+
                 for r in succeeded:
                     self.free_single_resource(res_key, r)
                 self.resource_in_use_count[res_key] -= len(failures)
-                for f in failures:
-                    f:Failure
-                    f.unwrap()
-                raise RuntimeError(f"could not allocate requested {amt} resource ({res_key}) for task: {failures}")
+                for e,trc in failures:
+                    print(f"-------resource allocation failure due to :{e}------------------")
+                    print(trc)
+                    print(f"----------------------------------------------------------------")
+                raise RuntimeError(f"could not allocate requested {amt} resource ({res_key}) for task: {[t[0] for t in failures]}")
             return succeeded
 
         def resolve(key: str, amt: int) -> Task:
