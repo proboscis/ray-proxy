@@ -11,8 +11,10 @@ from typing import List, Generic, TypeVar, Dict, Union, Set, Callable, Awaitable
 
 import pandas as pd
 import ray
+from cytoolz import valmap, groupby
 from ray import ObjectRef
 from ray.actor import ActorHandle
+from returns.future import future
 from returns.result import Failure
 
 from pinject_design import Injected
@@ -218,17 +220,72 @@ class ResourceRequest:
     result: Future[Resources]
 
 
+async def pure(x):
+    return x
+
+
+@dataclass
+class ResourceState:
+    source: IResourceFactory
+    scope: ResourceScope
+    pool: List[IResourceHandle] = field(default_factory=list)
+    use_count: int = field(default_factory=int)
+    issuable: int = field(default_factory=int)
+
+    def __post_init__(self):
+        self.issuable = self.source.num_available()
+
+    def num_issuable(self):
+        return self.issuable
+
+    def num_pooled(self):
+        return len(self.pool)
+
+    def obtain(self, request: Callable[[Dict[str, int]], Coroutine], executor) -> Coroutine:
+        if self.pool:
+            self.use_count += 1
+            return pure(self.pool.pop())
+        else:
+            # await is inevitable, but we dont want to block.
+            self.use_count += 1
+            self.issuable -= 1
+            return self._obtain(request, executor)
+
+    def stock(self, item: IResourceHandle):
+        if self.scope.to_keep(item):
+            self.pool.append(item)
+        else:
+            self.issuable += 1
+        self.use_count -= 1
+
+    def deallocate_pool(self, destructor=None):
+        if self.pool:
+            res = self.pool.pop()
+            self.issuable += 1
+            if destructor is not None:
+                destructor(res)
+            res.free()
+            yield res
+
+    async def _obtain(self, request, executor):
+        try:
+            res = await request(self.source.required_resources)
+            return await self.source.create(res, executor)
+        except Exception as e:
+            self.use_count -= 1
+            self.issuable += 1
+            print(e)
+            raise e
+
+
 @dataclass
 class ClusterTaskScheduler:
-    resource_pool: Dict[str, List[IResourceHandle]] = field(default_factory=lambda: defaultdict(list))
-    resource_scopes: Dict[str, ResourceScope] = field(default_factory=dict)
-    resource_sources: Dict[str, IResourceFactory] = field(default_factory=dict)
-    resource_in_use_count: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    # TODO combined these states into single dataclass
+    resource_states: Dict[str, ResourceState] = field(default_factory=dict)
     request_queue: List[ResourceRequest] = field(default_factory=list)
     background_internal_tasks: Set[Task] = field(default_factory=set)
     running_tasks: Set[Task] = field(default_factory=set)
     last_task_submission_time: datetime = field(default=None)
+
     running_flows: List = field(default_factory=list)
 
     def __post_init__(self):
@@ -240,39 +297,40 @@ class ClusterTaskScheduler:
         self.resource_creation_executor = ThreadPoolExecutor()
 
     def status(self):
-        resource_counts = {k: len(v) for k, v in self.resource_pool.items()}
-        num_availables = {k: v.num_available() for k, v in self.resource_sources.items()}
+        num_in_pools = self.pool_counts()
+        num_issuables = self.issuables()
+        use_counts = valmap(lambda v: v.use_count, self.resource_states)
         import pandas as pd
-        return pd.DataFrame([resource_counts, self.resource_in_use_count, num_availables],
+        return pd.DataFrame([num_in_pools, use_counts, num_issuables],
                             index=["in_pool", "in_use", "issuable"]).T
 
     def all_status(self):
         return dict(
-            resource_pool=self.resource_pool,
-            resource_scopes=self.resource_scopes,
-            resource_sources=self.resource_sources,
-            resource_in_use_count=self.resource_in_use_count,
+            states=self.resource_states,
             job_queue=[repr(t) for t in self.request_queue],
             background_tasks=[repr(t) for t in self.background_internal_tasks],
             last_task_submission_time=self.last_task_submission_time,
         )
 
     def register_resource_factory(self, key, factory, scope):
-        self.resource_sources[key] = factory
-        self.resource_scopes[key] = scope
-        self.resource_pool[key] = []
-        self.resource_in_use_count[key] = 0
+        self.resource_states[key] = ResourceState(factory, scope)
 
-    def find_missing_resources(self, reqs: Dict[str, int]):
-        resource_counts = {k: len(v) for k, v in self.resource_pool.items()}
-        num_availables = {k: v.num_available() for k, v in self.resource_sources.items()}
+    def pool_counts(self):
+        return {k: v.num_pooled() for k, v in self.resource_states.items()}
+
+    def issuables(self):
+        return {k: v.num_issuable() for k, v in self.resource_states.items()}
+
+    def find_missing_resources(self, request: Dict[str, int]):
+        resource_counts = self.pool_counts()
+        num_availables = self.issuables()
 
         def gather(key, amt):
             # print(f"trying to gather {amt} {key}")
             in_pool = resource_counts[key]
             missing = max(0, amt - in_pool)
             # print(f"found {missing} {key} missing from pool")
-            fac = self.resource_sources[key]
+            fac = self.resource_states[key].source
             while missing > 0:
                 reqs = fac.required_resources
                 if num_availables[key]:
@@ -285,7 +343,7 @@ class ClusterTaskScheduler:
                 missing -= 1
             resource_counts[key] -= min(in_pool, amt)
 
-        for k, amt in reqs.items():
+        for k, amt in request.items():
             gather(k, amt)
         # print(f"resource count: {resource_counts}")
         return {k: v for k, v in resource_counts.items() if v < 0}
@@ -306,82 +364,39 @@ class ClusterTaskScheduler:
             print(f"missing resources: {missings}")
             raise RuntimeError(f"missing resources:{missings}")
 
-        # these complicated implementation here is to let the resource allocated as a task without waiting.
-        # can I do this without this complication?
-
-        async def pure(x):
-            return x
-
-        async def get_dict(keys, tasks: List[Task]):
-            vals = await asyncio.gather(*tasks)
-            return dict(zip(keys, vals))
-
-        def resolve_request(req: dict) -> Task:
-            keys, nums = req.keys(), req.values()
-            tasks = []
-            for key, amt in zip(keys, nums):
-                tasks.append(resolve(key, amt))
-            return self.run_background(get_dict(keys, tasks))
-
-        async def retrieve_resource(fac: IResourceFactory, resource_task: Task) -> IResourceHandle:
-            res = await resource_task
-            # WARNING avoid making resource on remote to prevent resource leakage.
-            # WARNING awaiting the resource creation here caused resource leak.
-            try:
-                return await fac.create(res, self.resource_creation_executor)
-            except Exception as e:
-                fac: LambdaResourceFactory
-                fac.remaining += 1
-                raise e
-
-        def get_resource_background(fac) -> Task:
-            resource_task: Task = resolve_request(fac.required_resources)
-            fac: LambdaResourceFactory
-            fac.remaining -= 1
-            return self.run_background(retrieve_resource(fac, resource_task))
-
-        async def to_coro(task):
-            return await task
-
-        async def wait_all_tasks(tasks, res_key, amt):
-            failures = []
+        async def wait_key_coro_pairs(pairs: List[Tuple[str, Coroutine]]) -> Resources:
+            keys, coros = [t[0] for t in pairs], [t[1] for t in pairs]
+            tasks = [asyncio.create_task(c) for c in coros]
             succeeded = []
-            for t in tasks:
+            failures = []
+            for key, t in zip(keys, tasks):
                 try:
                     res: IResourceHandle = await t
-                    succeeded.append(res)
+                    succeeded.append((key, res))
                 except Exception as e:
                     import traceback
                     traceback_str = ray._private.utils.format_error_message(traceback.format_exc())
-                    failures.append((e, traceback_str))
+                    failures.append((key, e, traceback_str))
             if failures:
-
-                for r in succeeded:
-                    self.free_single_resource(res_key, r)
-                self.resource_in_use_count[res_key] -= len(failures)
-                for e, trc in failures:
-                    print(f"-------resource allocation failure due to :{e}------------------")
+                for k, r in succeeded:
+                    self.free_single_resource(k, r)
+                for k, e, trc in failures:
+                    print(f"-------resource allocation of {k} failed due to :{e}------------------")
                     print(trc)
                     print(f"----------------------------------------------------------------")
                 raise RuntimeError(
-                    f"could not allocate requested {amt} resource ({res_key}) for task: {[t[0] for t in failures]}")
-            return succeeded
+                    f"could not allocate requested resources ({[k[:2] for k in failures]})")
+            return groupby(lambda x: x[0], zip(keys, [v[1] for v in succeeded]))
 
-        def resolve(key: str, amt: int) -> Task:
-            self.resource_in_use_count[key] += amt
-            pool = self.resource_pool[key]
-            obtained = [self.run_background(pure(x)) for x in pool[:amt]]
-            self.resource_pool[key] = pool[len(obtained):]
-            missing = max(0, amt - len(obtained))
+        def resolve_request(request: Dict[str, int]) -> Coroutine:
+            key_coro_pairs = []
+            for key, amt in request.items():
+                creations = [(key, self.resource_states[key].obtain(resolve_request, self.resource_creation_executor))
+                             for _ in range(amt)]
+                key_coro_pairs += creations
+            return wait_key_coro_pairs(key_coro_pairs)
 
-            fac = self.resource_sources[key]
-            for i in range(missing):
-                # create a task to create a missing things
-                resource_task = get_resource_background(fac)
-                obtained.append(resource_task)
-            return self.run_background(wait_all_tasks(obtained, key, amt))
-
-        return resolve_request(reqs)
+        return self.run_background(resolve_request(reqs))
 
     async def get_resource(self, req: Dict[str, int]) -> Resources:
         """this is for external use."""
@@ -406,7 +421,8 @@ class ClusterTaskScheduler:
 
     async def schedule_task(self, task: ClusterTask):
         """schedule a resource, run the task after acquisition, free the resources"""
-        resources = await self.schedule_resource(task.required_resources)  # resource allocation errors are handled in parent.
+        resources = await self.schedule_resource(
+            task.required_resources)  # resource allocation errors are handled in parent.
         try:
             res = task.run(resources)
         finally:
@@ -482,19 +498,12 @@ class ClusterTaskScheduler:
                 self.free_single_resource(key, r)
 
     def free_single_resource(self, key, handle: IResourceHandle):
-        r = handle
-        if not self.resource_scopes[key].to_keep(r):
-            fac: LambdaResourceFactory = self.resource_sources[key]
-            fac.remaining += 1
-            r.free()
-            self.free_resources(r.consuming_resources)
-        else:
-            self.resource_pool[key].append(r)
-        self.resource_in_use_count[key] -= 1
+        self.resource_states[key].stock(handle)
+        self.free_resources(handle.consuming_resources)
 
     def _check_remaining_jobs(self):
         for item in self.request_queue:
-            missings = self.find_missing_resources(item.task.required_resources)
+            missings = self.find_missing_resources(item.request)
             if missings:
                 print(f"job not run due to missing resource:{missings}")
 
@@ -506,11 +515,9 @@ class ClusterTaskScheduler:
         _task.add_done_callback(group.discard)
         return _task
 
-    async def assign_resources(self,request:ResourceRequest,resource_task:Task):
+    async def assign_resources(self, request: ResourceRequest, resource_task: Task):
         res = await resource_task
         request.result.set_result(res)
-
-
 
     async def _schedule_loop(self):
         print(f"cluster task scheduler started")
@@ -541,16 +548,10 @@ class ClusterTaskScheduler:
         return f"ClusterTaskScheduler({len(self.running_tasks)}/{len(self.request_queue)})"
 
     def free_pool(self, key, amt, manual_destructor: Optional[Callable[[IResourceHandle], None]] = None):
-        pool = self.resource_pool[key]
+        state = self.resource_states[key]
         for i in range(amt):
-            if pool:
-                r = pool.pop()
-                fac: LambdaResourceFactory = self.resource_sources[key]
-                fac.remaining += 1
-                if manual_destructor is not None:
-                    manual_destructor(r)
-                r.free()
-                self.free_resources(r.consuming_resources)
+            for freed in state.deallocate_pool(manual_destructor):
+                self.free_resources(freed.consuming_resources)
 
 
 class RemoteTaskScheduler:
@@ -607,7 +608,6 @@ class RemoteTaskScheduler:
     def acquire(self, request: Dict[str, int]) -> ObjectRef:
         return self.actor.schedule_resource(request)
 
-    def schedule_resource(self, request: Dict[str, int],timeout:Union[timedelta,str]) -> Resources:
+    def schedule_resource(self, request: Dict[str, int], timeout: Union[timedelta, str]) -> Resources:
         timeout = pd.Timedelta(timeout) if not isinstance(timeout, timedelta) else timeout
         return self.actor.schedule_resource.remote(request, timeout)
-
