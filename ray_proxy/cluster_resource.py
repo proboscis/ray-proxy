@@ -5,12 +5,13 @@ from asyncio import Event, Future, Task
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pickle import PickleError
 from typing import List, Generic, TypeVar, Dict, Union, Set, Callable, Awaitable, Any, Tuple, Coroutine, Optional
 
 import pandas as pd
 import ray
+from ray import ObjectRef
 from ray.actor import ActorHandle
 from returns.result import Failure
 
@@ -212,16 +213,23 @@ class ScopedResourceFactory:
 
 
 @dataclass
+class ResourceRequest:
+    request: Dict[str, int]
+    result: Future[Resources]
+
+
+@dataclass
 class ClusterTaskScheduler:
     resource_pool: Dict[str, List[IResourceHandle]] = field(default_factory=lambda: defaultdict(list))
     resource_scopes: Dict[str, ResourceScope] = field(default_factory=dict)
     resource_sources: Dict[str, IResourceFactory] = field(default_factory=dict)
     resource_in_use_count: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
     # TODO combined these states into single dataclass
-    job_queue: List[QueuedTask] = field(default_factory=list)
+    request_queue: List[ResourceRequest] = field(default_factory=list)
     background_internal_tasks: Set[Task] = field(default_factory=set)
     running_tasks: Set[Task] = field(default_factory=set)
     last_task_submission_time: datetime = field(default=None)
+    running_flows: List = field(default_factory=list)
 
     def __post_init__(self):
         self.reschedule_event = Event()
@@ -244,7 +252,7 @@ class ClusterTaskScheduler:
             resource_scopes=self.resource_scopes,
             resource_sources=self.resource_sources,
             resource_in_use_count=self.resource_in_use_count,
-            job_queue=[repr(t) for t in self.job_queue],
+            job_queue=[repr(t) for t in self.request_queue],
             background_tasks=[repr(t) for t in self.background_internal_tasks],
             last_task_submission_time=self.last_task_submission_time,
         )
@@ -287,7 +295,8 @@ class ClusterTaskScheduler:
         obtain resources in blocking manner.
         resource number calculation is done in this thread
         creation is done on the executor.
-        returns a task for asyncio
+        returns a task for asyncio.
+        raises an error immidiately if no sufficient resources are present.
         :param reqs:
         :return:
         """
@@ -316,8 +325,8 @@ class ClusterTaskScheduler:
 
         async def retrieve_resource(fac: IResourceFactory, resource_task: Task) -> IResourceHandle:
             res = await resource_task
-            # TODO avoid making resource on remote to prevent resource leakage.
-            # TODO awaiting the resource creation here caused resource leak.
+            # WARNING avoid making resource on remote to prevent resource leakage.
+            # WARNING awaiting the resource creation here caused resource leak.
             try:
                 return await fac.create(res, self.resource_creation_executor)
             except Exception as e:
@@ -344,17 +353,18 @@ class ClusterTaskScheduler:
                 except Exception as e:
                     import traceback
                     traceback_str = ray._private.utils.format_error_message(traceback.format_exc())
-                    failures.append((e,traceback_str))
+                    failures.append((e, traceback_str))
             if failures:
 
                 for r in succeeded:
                     self.free_single_resource(res_key, r)
                 self.resource_in_use_count[res_key] -= len(failures)
-                for e,trc in failures:
+                for e, trc in failures:
                     print(f"-------resource allocation failure due to :{e}------------------")
                     print(trc)
                     print(f"----------------------------------------------------------------")
-                raise RuntimeError(f"could not allocate requested {amt} resource ({res_key}) for task: {[t[0] for t in failures]}")
+                raise RuntimeError(
+                    f"could not allocate requested {amt} resource ({res_key}) for task: {[t[0] for t in failures]}")
             return succeeded
 
         def resolve(key: str, amt: int) -> Task:
@@ -384,7 +394,7 @@ class ClusterTaskScheduler:
             async def periodic_check():
                 while True:
                     await asyncio.sleep(3)
-                    if self.job_queue:
+                    if self.request_queue:
                         if self.last_task_submission_time is None:
                             self.reschedule_event.set()
                             self._check_remaining_jobs()
@@ -395,12 +405,26 @@ class ClusterTaskScheduler:
             self.periodic_check_task = asyncio.create_task(periodic_check())
 
     async def schedule_task(self, task: ClusterTask):
-        future = Future()
-        queued = QueuedTask(task, future)
-        self.job_queue.append(queued)
-        self.reschedule_event.set()
-        res = await future
+        """schedule a resource, run the task after acquisition, free the resources"""
+        resources = await self.schedule_resource(task.required_resources)  # resource allocation errors are handled in parent.
+        try:
+            res = task.run(resources)
+        finally:
+            self.free_resources(resources)
+            self.reschedule_event.set()
         return res
+
+    async def schedule_resource(self, request: Dict[str, int]) -> Resources:
+        """
+        schedule for resources in this scheduler.
+        a user must free the resources after use!
+        :param request:
+        :return:
+        """
+        request = ResourceRequest(request, Future())
+        self.request_queue.append(request)
+        self.reschedule_event.set()
+        return await request.result
 
     async def schedule_flow(self, flow: Expr[Union[ClusterFunc, Any]]):
         """
@@ -446,7 +470,11 @@ class ClusterTaskScheduler:
 
                         return await remote_call.remote(func, args, kwargs)
 
-        return await eval_ast(flow)
+        self.running_flows.append(flow)
+        try:
+            return await eval_ast(flow)
+        finally:
+            self.running_flows.remove(flow)
 
     def free_resources(self, used_resources: Resources):
         for key, resources in used_resources.items():
@@ -465,7 +493,7 @@ class ClusterTaskScheduler:
         self.resource_in_use_count[key] -= 1
 
     def _check_remaining_jobs(self):
-        for item in self.job_queue:
+        for item in self.request_queue:
             missings = self.find_missing_resources(item.task.required_resources)
             if missings:
                 print(f"job not run due to missing resource:{missings}")
@@ -478,46 +506,39 @@ class ClusterTaskScheduler:
         _task.add_done_callback(group.discard)
         return _task
 
-    async def invoke_task(self, item, resources_task):
-        resource = None
-        try:
-            resource = await resources_task
-            # TODO free failed resource allocations
-            result = await item.task.run(resource)
-            item.future.set_result(result)
-        except Exception as e:
-            item.future.set_exception(e)
-        finally:
-            if resource is not None:
-                print(f"freeing resources")
-                self.free_resources(resource)
-            self.reschedule_event.set()
+    async def assign_resources(self,request:ResourceRequest,resource_task:Task):
+        res = await resource_task
+        request.result.set_result(res)
+
+
 
     async def _schedule_loop(self):
         print(f"cluster task scheduler started")
         while True:
             # print(f"waiting for an event to check runnable tasks")
             await self.reschedule_event.wait()
-            print(f"--- job check ({len(self.running_tasks)}/{len(self.job_queue)}) ---")
+            print(
+                f"--- job check ({len(self.running_tasks)}/{len(self.request_queue)}/{len(self.running_flows)}) == running/queued/flows ---")
             print(self.status())
             submitted = []
-            for item in self.job_queue:
-                if not self.find_missing_resources(item.task.required_resources):
+            if not self.request_queue:
+                print(f"---- no job queued for execution ----")
+            for item in self.request_queue:
+                if not self.find_missing_resources(item.request):
                     print(f"_______________resource allocation_________________")
-                    resources_task = self._get_resource(item.task.required_resources)
+                    resources_task = self._get_resource(item.request)
                     print(self.status())
                     print(f"_______________resource allocation done________________")
-                    self.run_background(self.invoke_task(item, resources_task), self.running_tasks)
+                    self.run_background(self.assign_resources(item, resources_task), self.running_tasks)
                     self.last_task_submission_time = datetime.now()
                     submitted.append(item)
             for item in submitted:
-                self.job_queue.remove(item)
-
+                self.request_queue.remove(item)
             print(f"-----------------")
             self.reschedule_event.clear()
 
     def __repr__(self):
-        return f"ClusterTaskScheduler({len(self.running_tasks)}/{len(self.job_queue)})"
+        return f"ClusterTaskScheduler({len(self.running_tasks)}/{len(self.request_queue)})"
 
     def free_pool(self, key, amt, manual_destructor: Optional[Callable[[IResourceHandle], None]] = None):
         pool = self.resource_pool[key]
@@ -571,14 +592,22 @@ class RemoteTaskScheduler:
     def submit(self, resources: Dict[str, int], task):
         return self.actor.schedule_task.remote(LambdaClusterTask(resources, task))
 
-    def status(self):
-        return ray.get(self.actor.status.remote())
+    def status(self) -> ObjectRef:
+        return self.actor.status.remote()
 
-    def get_resources(self, **request: int):
-        return ray.get(self.actor.get_resource.remote(request))
+    def get_resources(self, **request: int) -> ObjectRef:
+        return self.actor.get_resource.remote(request)
 
-    def free_resources(self, resources: Resources):
-        return ray.get(self.actor.free_resources.remote(resources))
+    def free_resources(self, resources: Resources) -> ObjectRef:
+        return self.actor.free_resources.remote(resources)
 
-    def free_pool(self, key, amt, manual_destructor: Optional[Callable[[IResourceHandle], None]] = None):
-        return ray.get(self.actor.free_pool.remote(key, amt, manual_destructor))
+    def free_pool(self, key, amt, manual_destructor: Optional[Callable[[IResourceHandle], None]] = None) -> ObjectRef:
+        return self.actor.free_pool.remote(key, amt, manual_destructor)
+
+    def acquire(self, request: Dict[str, int]) -> ObjectRef:
+        return self.actor.schedule_resource(request)
+
+    def schedule_resource(self, request: Dict[str, int],timeout:Union[timedelta,str]) -> Resources:
+        timeout = pd.Timedelta(timeout) if not isinstance(timeout, timedelta) else timeout
+        return self.actor.schedule_resource.remote(request, timeout)
+
