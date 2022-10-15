@@ -27,3 +27,40 @@ def test_register_resource_factory():
 
 def test_schedule_resources():
     assert False
+
+
+@dataclass
+class Resource:
+    pass
+
+@dataclass
+class ResourceHandle:
+    scheduler:ActorHandle
+    resource:Resource
+    async def free(self):
+        return await self.scheduler.free.remote(self.resource)
+
+@dataclass
+class Scheduler:
+    resources: List[Resource]
+    self_ref:ActorHandle=None
+
+    async def free(self, res: Resource):
+        self.resources.remove(res)
+    async def set_self(self,ref):
+        self.self_ref = ref
+
+    async def create_res(self):
+        res = Resource()
+        self.resources.append(res)
+        return ResourceHandle(self.self_ref,res)
+    async def self_free(self,handle:ResourceHandle):
+        return await handle.free()
+
+
+
+def test_recursive_call():
+    sch = ray.remote(Scheduler).remote([])
+    ray.get(sch.set_self.remote(sch))
+    handle = ray.get(sch.create_res.remote())
+    ray.remote(sch.self_free.remote(handle))
