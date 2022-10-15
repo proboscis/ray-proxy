@@ -159,7 +159,7 @@ class IResourceFactory(Generic[T], ABC):
         pass
 
     @abstractmethod
-    def num_available(self) -> int:
+    def max_issuable(self) -> int:
         pass
 
 
@@ -167,7 +167,7 @@ class IResourceFactory(Generic[T], ABC):
 class LambdaResourceFactory(IResourceFactory[T]):
     _required_resources: Dict[str, int]
     _factory: Callable[[Resources, ThreadPoolExecutor], Awaitable[T]]
-    remaining: int  # TODO move this state to scheduler
+    _max_issuable: int
     destructor: Optional[Callable[[T], None]] = field(default=None)
 
     async def create(self, resources: Resources, executor: ThreadPoolExecutor) -> IResourceHandle[T]:
@@ -179,8 +179,8 @@ class LambdaResourceFactory(IResourceFactory[T]):
             self._destructor,
         )
 
-    def num_available(self) -> int:
-        return self.remaining
+    def max_issuable(self) -> int:
+        return self._max_issuable
 
     @property
     def required_resources(self):
@@ -229,11 +229,11 @@ class ResourceState:
     source: IResourceFactory
     scope: ResourceScope
     pool: List[IResourceHandle] = field(default_factory=list)
-    use_count: int = field(default_factory=int)
+    use_count: int = field(default_factory=int)  # todo fix the number of used count is not correct
     issuable: int = field(default_factory=int)
 
     def __post_init__(self):
-        self.issuable = self.source.num_available()
+        self.issuable = self.source.max_issuable()
 
     def num_issuable(self):
         return self.issuable
@@ -242,12 +242,15 @@ class ResourceState:
         return len(self.pool)
 
     def obtain(self, request: Callable[[Dict[str, int]], Coroutine], executor) -> Coroutine:
+        self.use_count += 1
+        # why is this only incremented twice?
+        # ah it is quite true because the gpus are only obtained twice.
+        # I mean the gpu is not returned to the pool. while the txt2img_env is using it.
+        # in that case, why does the count get decremented?
         if self.pool:
-            self.use_count += 1
             return pure(self.pool.pop())
         else:
             # await is inevitable, but we dont want to block.
-            self.use_count += 1
             self.issuable -= 1
             return self._obtain(request, executor)
 
@@ -256,6 +259,7 @@ class ResourceState:
             self.pool.append(item)
         else:
             self.issuable += 1
+            return item
         self.use_count -= 1
 
     def deallocate_pool(self, destructor=None):
@@ -265,7 +269,7 @@ class ResourceState:
             if destructor is not None:
                 destructor(res)
             res.free()
-            yield res
+            return res
 
     async def _obtain(self, request, executor):
         try:
@@ -386,7 +390,9 @@ class ClusterTaskScheduler:
                     print(f"----------------------------------------------------------------")
                 raise RuntimeError(
                     f"could not allocate requested resources ({[k[:2] for k in failures]})")
-            return groupby(lambda x: x[0], zip(keys, [v[1] for v in succeeded]))
+            resources = valmap(lambda tuples: [t[1] for t in tuples],
+                               groupby(lambda x: x[0], zip(keys, [v[1] for v in succeeded])))
+            return resources
 
         def resolve_request(request: Dict[str, int]) -> Coroutine:
             key_coro_pairs = []
@@ -430,7 +436,19 @@ class ClusterTaskScheduler:
             self.reschedule_event.set()
         return res
 
-    async def schedule_resource(self, request: Dict[str, int]) -> Resources:
+    def _parse_timeout(self, timeout: Optional[Union[str, timedelta, float]]) -> Optional[float]:
+        match timeout:
+            case str():
+                return self._parse_timeout(pd.Timedelta(timeout))
+            case timedelta():
+                return timeout.total_seconds()
+            case float():
+                return timeout
+            case None:
+                return None
+
+    async def schedule_resource(self, request: Dict[str, int],
+                                timeout: Optional[Union[str, timedelta, float]]=None) -> Resources:
         """
         schedule for resources in this scheduler.
         a user must free the resources after use!
@@ -440,7 +458,7 @@ class ClusterTaskScheduler:
         request = ResourceRequest(request, Future())
         self.request_queue.append(request)
         self.reschedule_event.set()
-        return await request.result
+        return await asyncio.wait_for(request.result, self._parse_timeout(timeout))
 
     async def schedule_flow(self, flow: Expr[Union[ClusterFunc, Any]]):
         """
@@ -496,10 +514,12 @@ class ClusterTaskScheduler:
         for key, resources in used_resources.items():
             for r in resources:
                 self.free_single_resource(key, r)
+        self.reschedule_event.set()
 
     def free_single_resource(self, key, handle: IResourceHandle):
-        self.resource_states[key].stock(handle)
-        self.free_resources(handle.consuming_resources)
+        unstocked = self.resource_states[key].stock(handle)
+        if unstocked is not None:
+            self.free_resources(handle.consuming_resources)
 
     def _check_remaining_jobs(self):
         for item in self.request_queue:
@@ -550,7 +570,8 @@ class ClusterTaskScheduler:
     def free_pool(self, key, amt, manual_destructor: Optional[Callable[[IResourceHandle], None]] = None):
         state = self.resource_states[key]
         for i in range(amt):
-            for freed in state.deallocate_pool(manual_destructor):
+            freed = state.deallocate_pool(manual_destructor)
+            if freed is not None:
                 self.free_resources(freed.consuming_resources)
 
 
@@ -597,6 +618,11 @@ class RemoteTaskScheduler:
         return self.actor.status.remote()
 
     def get_resources(self, **request: int) -> ObjectRef:
+        """
+        return the resource or throw error immidiately if no sufficient resources are available.
+        :param request:
+        :return:
+        """
         return self.actor.get_resource.remote(request)
 
     def free_resources(self, resources: Resources) -> ObjectRef:
@@ -608,6 +634,6 @@ class RemoteTaskScheduler:
     def acquire(self, request: Dict[str, int]) -> ObjectRef:
         return self.actor.schedule_resource(request)
 
-    def schedule_resource(self, request: Dict[str, int], timeout: Union[timedelta, str]) -> Resources:
+    def schedule_resources(self, request: Dict[str, int], timeout: Optional[Union[timedelta, str]]) -> ObjectRef:
         timeout = pd.Timedelta(timeout) if not isinstance(timeout, timedelta) else timeout
         return self.actor.schedule_resource.remote(request, timeout)

@@ -24,3 +24,6 @@ def test_register_resource_factory():
     print(ray.get(results))
     print(sch.status())
 
+
+def test_schedule_resources():
+    assert False
