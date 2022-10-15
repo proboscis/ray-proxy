@@ -258,7 +258,8 @@ class ResourceState:
         else:
             # await is inevitable, but we dont want to block.
             self.issuable -= 1
-            return self._obtain(request, executor)
+            task = request(self.source.required_resources)
+            return self._obtain(task, executor)
 
     def stock(self, item: IResourceHandle):
         if self.scope.to_keep(item):
@@ -277,15 +278,17 @@ class ResourceState:
             res.free()
             return res
 
-    async def _obtain(self, request, executor):
+    async def _obtain(self, resource_task, executor):
         try:
-            res = await request(self.source.required_resources)
+            res = await resource_task
             return await self.source.create(res, executor)
         except Exception as e:
             self.use_count -= 1
             self.issuable += 1
             print(e)
             raise e
+
+
 
 
 @dataclass
