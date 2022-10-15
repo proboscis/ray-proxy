@@ -26,6 +26,11 @@ T = TypeVar("T")
 class IResourceHandle(Generic[T], ABC):
     @abstractmethod
     def free(self):
+        # this should be able to be called from anywhere within the cluster.
+        # and calling this should immidiately release the resource on scheduler
+        # and dependencies should also be released.
+        # this means that this handle holds a reference to the scheduler actor
+        # the question is whether it is ok to call the actor itself...
         pass
 
     @property
@@ -49,10 +54,10 @@ Resources = Dict[str, List[IResourceHandle]]
 
 @dataclass
 class LambdaResourceHandle(IResourceHandle[T]):
-    _id: uuid.UUID
     _value: T
     _consuming_resources: Resources
-    _free: Callable[[T], None] = field(default=lambda value: None)
+    _id: uuid.UUID = field(default_factory=uuid.uuid4)
+    _free: Optional[Callable[[T], None]] = field(default=None)
 
     @property
     def value(self) -> T:
@@ -63,11 +68,13 @@ class LambdaResourceHandle(IResourceHandle[T]):
         return self._id
 
     def free(self):
-        return self._free(self.value)
+        if self._free is not None:
+            self._free(self._value)
 
     @property
     def consuming_resources(self) -> Resources:
         return self._consuming_resources
+
 
 
 class ClusterTask(ABC):
@@ -173,10 +180,9 @@ class LambdaResourceFactory(IResourceFactory[T]):
     async def create(self, resources: Resources, executor: ThreadPoolExecutor) -> IResourceHandle[T]:
         value = await self._factory(resources, executor)
         return LambdaResourceHandle(
-            uuid.uuid4(),
             value,
             resources,
-            self._destructor,
+            _free=self._destructor,
         )
 
     def max_issuable(self) -> int:
@@ -448,7 +454,7 @@ class ClusterTaskScheduler:
                 return None
 
     async def schedule_resource(self, request: Dict[str, int],
-                                timeout: Optional[Union[str, timedelta, float]]=None) -> Resources:
+                                timeout: Optional[Union[str, timedelta, float]] = None) -> Resources:
         """
         schedule for resources in this scheduler.
         a user must free the resources after use!
@@ -510,15 +516,23 @@ class ClusterTaskScheduler:
         finally:
             self.running_flows.remove(flow)
 
-    def free_resources(self, used_resources: Resources):
+    def _free_resources(self, used_resources: Resources):
         for key, resources in used_resources.items():
             for r in resources:
                 self.free_single_resource(key, r)
+
+    def free_resources(self, used_resources: Resources):
+        self._free_resources(used_resources)
         self.reschedule_event.set()
 
     def free_single_resource(self, key, handle: IResourceHandle):
-        unstocked = self.resource_states[key].stock(handle)
-        if unstocked is not None:
+        if key in self.resource_states:
+            unstocked = self.resource_states[key].stock(handle)
+            if unstocked is not None:
+                self.free_resources(handle.consuming_resources)
+                handle.free()
+
+        else:
             self.free_resources(handle.consuming_resources)
 
     def _check_remaining_jobs(self):

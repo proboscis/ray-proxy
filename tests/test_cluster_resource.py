@@ -1,6 +1,9 @@
 import uuid
+from dataclasses import dataclass
+from typing import List
 
 import ray
+from ray.actor import ActorHandle
 
 from ray_proxy.cluster_resource import RemoteTaskScheduler
 
