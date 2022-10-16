@@ -73,7 +73,7 @@ class ResourceDesign:
             {**self.resources, **other.resources}
         )
 
-    def to_scheduler(self):
+    def to_scheduler(self)->"ResourceSchedulerClient":
         from ray_proxy.resource_scheduler import ResourceSchedulerClient
         sch = ResourceSchedulerClient.create(self)
         return sch

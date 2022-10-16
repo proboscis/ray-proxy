@@ -262,12 +262,12 @@ class ResourceState:
             return self._obtain(task, executor)
 
     def stock(self, item: IResourceHandle):
+        self.use_count -= 1
         if self.scope.to_keep(item):
             self.pool.append(item)
         else:
             self.issuable += 1
             return item
-        self.use_count -= 1
 
     def deallocate_pool(self, destructor=None):
         if self.pool:
@@ -569,10 +569,10 @@ class ClusterTaskScheduler:
                 print(f"---- no job queued for execution ----")
             for item in self.request_queue:
                 if not self.find_missing_resources(item.request):
-                    print(f"_______________resource allocation_________________")
+                    # print(f"_______________resource allocation_________________")
                     resources_task = self._get_resource(item.request)
-                    print(self.status())
-                    print(f"_______________resource allocation done________________")
+                    # print(self.status())
+                    # print(f"_______________resource allocation done________________")
                     self.run_background(self.assign_resources(item, resources_task), self.running_tasks)
                     self.last_task_submission_time = datetime.now()
                     submitted.append(item)

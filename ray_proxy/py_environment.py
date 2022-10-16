@@ -15,6 +15,7 @@ from bidict import bidict
 
 @dataclass
 class PyInterpreter:
+    # todo make this interpreter async so that recursive call can be accepted.
     env_id: uuid.UUID = field(default_factory=uuid.uuid4)
     instances: dict = field(default_factory=dict)  # id->instance mapping
     ref_counts: dict = field(

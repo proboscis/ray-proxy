@@ -13,7 +13,8 @@ from ray_proxy.resource_scheduler import ResourceSchedulerClient
 design = ResourceDesign().bind_provider(
     x=InjectedResource(Injected.pure("x"), "reserved", 100),
     y=InjectedResource(Injected.pure("y"), "reserved", 100),
-    z=InjectedResource(Injected.by_name("x").zip(Injected.by_name("y")), "reserved", 100)
+    z=InjectedResource(Injected.by_name("x").zip(Injected.by_name("y")), "reserved", 100),
+    t = InjectedResource(Injected.by_name("z"), "ondemand",10)
 )
 
 
@@ -95,3 +96,22 @@ def test_scheduling_speed():
     print(dt)
     assert dt <= pd.Timedelta("20 seconds"),dt
     print(sch.status())
+
+def test_long_running_tasks():
+    sch = design.override_issuable(z=6).to_scheduler()
+    @ray.remote
+    def task(index):
+        print(f"task {index} waiting for resource")
+        with sch["t"] as t:
+            print(f"task {index} got {t}")
+            time.sleep(1)
+            print(f"task {index} trying to release {t}")
+        with sch["z"] as z:
+            print(f"task {index} got {z}")
+            time.sleep(1)
+            print(f"task {index} trying to release {z}")
+        print(f"task {index} released {z} and {t}")
+        return index
+    ray.get([task.remote(i) for i in range(100)])
+    print(sch.status())
+

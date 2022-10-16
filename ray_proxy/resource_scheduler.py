@@ -282,6 +282,7 @@ class ResourceSchedulerClient:
 
     @staticmethod
     def create(design: ResourceDesign) -> "ResourceSchedulerClient":
+        assert isinstance(design,ResourceDesign)
         actor = ray.remote(ClusterResourceScheduler).remote()
         ray.get(actor.start.remote())
         client = ResourceSchedulerClient(actor, design)
@@ -310,8 +311,11 @@ class ResourceSchedulerClient:
                 raise ValueError(f"unknown resource scope:{scope}")
         self.add_factory(name, LambdaResourceFactory(reqs, factory, n_issuable, destructor), scope)
 
-    def status(self) -> ObjectRef:
+    def status(self) -> pd.DataFrame:
         return ray.get(self.actor.status.remote())
+
+    def all_status(self) -> ObjectRef:
+        return ray.get(self.actor.all_status.remote())
 
     def get_resources(self, **request: int) -> ObjectRef:
         """
