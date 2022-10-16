@@ -35,13 +35,13 @@ class Var(Generic[T]):
     def __atexit__(self):
         # this is required because the __del__ is called
         # after the imported modules are destroyed on interpreter shutdown.
-        self.env.decr_ref(self.id)
+        #self.env.decr_ref(self.id)
         self.released = True
 
     def fetch(self):
         return ray.get(self.fetch_ref())
 
-    def fetch_ref(self):
+    def fetch_ref(self)->ObjectRef:
         return self.env.fetch_id(self.id)
 
     def __str__(self):
