@@ -30,25 +30,51 @@ class Var(Generic[T]):
     def __post_init__(self):
         assert isinstance(self.id, ObjectRef)
         self.___proxy_dirs___ = None
-        self.released = False
+        self.released = True
         atexit.register(self.__atexit__)
+        # print(f"constructed id:{id(self)}")
 
     def __atexit__(self):
         # this is required because the __del__ is called
         # after the imported modules are destroyed on interpreter shutdown.
-        #self.env.decr_ref(self.id)
-        self.released = True
+        if not self.released:
+            #oid = ray.get(self.id)
+            # print(f"deleting |{id(self)}| {self}")
+            print(f"sending release request for {self.id} in __atexit__")
+            self.env.decr_ref(self.id)
+            print(f"sent release request for {self.id}")
+            self.released = True
+            #print(f"released:{self.released}")
+
+    def __del__(self):
+        # print(f"dereferencing")
+        # logger.info(f"dereferencing:{self.id}")
+        # print(f"destructor call of id:{id(self)}: released?{self.released}")
+        if not self.released:
+            print(f"sending release request for {self.id} in __del__")
+            self.env.decr_ref(self.id)
+            print(f"decr_ref:{self.id}")
+            atexit.unregister(self.__atexit__)
+            self.deleted = True
+        # print(f"dereferencing done")
 
     def fetch(self):
         return ray.get(self.fetch_ref())
 
-    def fetch_ref(self)->ObjectRef:
+    def fetch_ref(self) -> ObjectRef:
         return self.env.fetch_id(self.id)
 
     def __str__(self):
         _str: Var = self.env.func_on_id(self.id, str)  # this returns proxy
         host = self.env.get_host()
-        host, _repr, _id = ray.get([host, _str.fetch_ref(), self.env.id])
+        print(f"trying to get host")
+        host = ray.get(host)
+        print(f"trying to get repr")
+        _repr = ray.get(_str.fetch_ref())
+        print(f"trying to get env id")
+        _id = ray.get(self.env.id)
+
+        #host, _repr, _id = ray.get([host, _str.fetch_ref(), self.env.id])
         # Var@zeus[abcde]:hello world
         return f"Var@{host}[{str(_id)[:5]}]:{_repr}"
 
@@ -127,15 +153,6 @@ class Var(Generic[T]):
     def __iter__(self):
         return self.env.iter_of_id(self.id)
 
-    def __del__(self):
-        # print(f"dereferencing")
-        # logger.info(f"dereferencing:{self.id}")
-        if not self.released:
-            self.env.decr_ref(self.id)
-            print(f"decr_ref:{self.id}")
-            atexit.unregister(self.__atexit__)
-        # print(f"dereferencing done")
-
     def __dir__(self) -> Iterable[str]:
         _dir = self.env.dir_of_id(self.id)
         # print(f"dir is called for {self}")
@@ -213,11 +230,14 @@ class Var(Generic[T]):
 
 
 def rp_deserializer(state):
+    print(f"deserializing Var")
     rp = Var(state[0], state[1])
+    print(f"reconstructed Var:|{id(rp)}|")
     return rp
 
 
 def rp_serializer(rp: Var):
+    print(f"serializing Var:|{id(rp)}")
     rp.env.incr_ref(rp.id)
     return rp.env, rp.id
 

@@ -52,9 +52,11 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
         )
 
     def put_named(self, name: str, item) -> Var:
+        id_ref = self.remote_env.put_named.remote(item, name)
+        #ray.get(id_ref)
         return Var(
             self,
-            self.remote_env.put_named.remote(item, name)
+            id_ref
         )
 
     def get_named_instances(self) -> Dict[str, Var]:
@@ -124,6 +126,7 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
         # we need to directly call the decr_ref_id of this proxy.
         # but how? maybe using global variables?
         #
+        print(f"decr_ref is called for {ray.get(id)}")
         return self.remote_env_refs.decr_ref_id.remote(id)
 
     def type_of_id(self, id) -> Var:
@@ -170,13 +173,13 @@ class RemoteInterpreterFactory:
     ray: "ray"
 
     def create(self, **options) -> IRemoteInterpreter:
-        #actor = self.ray.remote(PyInterpreter).options(**options).remote()
-        actor = self.ray.remote(AsyncPyInterpreter).options(**options).remote()
+        actor = self.ray.remote(PyInterpreter).options(**options).remote()
+        #actor = self.ray.remote(AsyncPyInterpreter).options(**options).remote()
         return ActorRefRemoteInterpreter(actor)
 
     def get(self, name) -> IRemoteInterpreter:
         actor = ray.get_actor(name)
-        kind = ray.get(actor.get_kind.remote())
+        #kind = ray.get(actor.get_kind.remote())
         return ActorRefRemoteInterpreter(actor)
 
     def __getitem__(self, env_name) -> IRemoteInterpreter:

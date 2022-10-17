@@ -56,14 +56,18 @@ class PyInterpreter:
         from ray_proxy.remote_proxy import Var
         if isinstance(proxy, Var):
             # unwrap if the proxy lives in this environment
+            # this can cause a deadlock. since two envs can try to fetch from each other at the same time.
+            # we need to stop calling ray.get here.
             from loguru import logger
             assert isinstance(proxy.env.id, ObjectRef), f"proxy.env.id is not a reference:{type(proxy.env.id)}"
-            eid = ray.get(proxy.env.id)
+            eid = ray.get(proxy.env.id) # this fine since no actor is involved
             if self.env_id == eid:
                 return self.instances[ray.get(proxy.id)]
             else:
                 logger.warning(f"fetching from a proxy which lives in different env:{eid}")
-                return proxy.fetch()
+                # we need to release the lock here to respond to the other request, trying to fetch from this env.
+
+                return proxy.fetch() #this, can cause a deadlock
         if isinstance(proxy, tuple):
             return tuple(self._unwrap(item) for item in proxy)
         if isinstance(proxy, list):
@@ -110,6 +114,7 @@ class PyInterpreter:
     def decr_ref_id(self, id):
         # assert self.ref_counts[id] > 0, "unregistering something doesn't exist"
         # print(f"decr_ref_id:{id}")
+        print(f"decr_ref_id:{id}")
         if id not in self.ref_counts:
             return "decr_ref_failure: id not found."
         self.ref_counts[id] -= 1

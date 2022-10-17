@@ -439,7 +439,8 @@ class ResourceSchedulerClient:
                         tasks += [r.release() for r in releasables]
                     case IReleasable() as r:
                         tasks.append(r.release())
-            print(f"release results:{ray.get(tasks)}")
+            ray.get(tasks)
+            #print(f"release results:{ray.get(tasks)}")
 
     def _injected_resources(self, injected):
         return {k: 1 for k in injected.dependencies()}

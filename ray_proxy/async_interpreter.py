@@ -10,8 +10,6 @@ from typing import Callable, Union, Any
 
 import ray
 from ray import ObjectRef
-from ray.actor import ActorHandle
-from ray.util.queue import Queue
 from bidict import bidict
 
 class MyStopIteration(RuntimeError):
@@ -29,6 +27,8 @@ class AsyncPyInterpreter:
     def __post_init__(self):
         self.host = socket.gethostname()
         print(f"PyInterpreter created at {self.host}")
+        # why would you even need an async actor?
+        # I dont think we would?
 
     async def reset(self):
         from loguru import logger
@@ -49,6 +49,8 @@ class AsyncPyInterpreter:
         return "PyInterpreter"
 
     async def get_host(self):
+        print(f"get_host called. just before returning it.")
+
         return self.host
 
     async def get_env_id(self):
@@ -59,15 +61,18 @@ class AsyncPyInterpreter:
 
     async def _unwrap(self, proxy: "RemoteProxy"):
         from ray_proxy.remote_proxy import Var
+        print(f"unwrapping:{type(proxy)}")
         if isinstance(proxy, Var):
             # unwrap if the proxy lives in this environment
-            from loguru import logger
             assert isinstance(proxy.env.id, ObjectRef), f"proxy.env.id is not a reference:{type(proxy.env.id)}"
+            print(f"awaiting env id of Var")
             eid = await proxy.env.id
             if self.env_id == eid:
-                return self.instances[ray.get(proxy.id)]
+                print(f"awaiting Var's id")
+                oid = await proxy.id
+                return self.instances[oid]
             else:
-                logger.warning(f"fetching from a proxy which lives in different env:{eid}")
+                print(f"fetching from a proxy which lives in different env:{eid}")
                 return await proxy.fetch_ref()
         if isinstance(proxy, tuple):
             return tuple(await asyncio.gather(*[self._unwrap(item) for item in proxy]))
@@ -151,10 +156,14 @@ class AsyncPyInterpreter:
         return "decr_ref_success"
 
     async def call_id(self, id, args, kwargs):
+        #print(f"call_id:{id},{args},{kwargs} trying to obtain lock")
+        print(f"calling id,before lock")
         async with self.lock:
+            print(f"calling id,after lock")
+            #print(f"call_id:{id},{args},{kwargs} obtained lock")
             args, kwargs = await self._unwrap_inputs(args, kwargs)
             res = self.instances[id](*args, **kwargs)
-            await self._register_without_lock(res)
+            return await self._register_without_lock(res)
 
     async def call_method_id(self, id, method, args, kwargs):
         async with self.lock:
@@ -222,8 +231,11 @@ class AsyncPyInterpreter:
             return type(self.instances[id])
 
     async def func_on_id(self, id, function: Callable) -> uuid.UUID:
+        print(f"calling func on id, before lock")
         async with self.lock:
-            return await self._register_without_lock(function(self.instances[id]))
+            print(f"obtained lock in calling func_on_id:{id}")
+            data = function(self.instances[id])
+            return await self._register_without_lock(data)
 
     async def next_of_id(self, id) -> uuid.UUID:
         # you cannot
@@ -256,20 +268,20 @@ class AsyncPyInterpreter:
         return res
 
     async def put_named(self, item, name: str):
+        print(f"put named before lock")
         async with self.lock:
             return await self._put_named_without_lock(item, name)
 
     async def _put_named_without_lock(self, item, name):
-        from loguru import logger
+        print(f"put named:{name},{type(item)}")
         name, item = await self._unwrap((name, item))
         assert isinstance(name, str)
         if name in self.named_instances:
-            from loguru import logger
-            logger.warning(f"replacing named instance:{name}")
+            print(f"replacing named instance:{name}")
             await self.del_named(name)
         _id = await self._register_without_lock(item)
         self.named_instances[name] = _id
-        logger.warning(f"placed named instance:{name}")
+        print(f"placed named instance:{name}")
         await self.incr_ref_id(_id)  # increment reference from this env.
         return _id
 
@@ -286,9 +298,13 @@ class AsyncPyInterpreter:
         await self.decr_ref_id(_id)
 
     async def get_named(self, name: str):
+        print(f"get named before lock")
         async with self.lock:
+            print(f"get_named called with name:{name}")
             name = await self._unwrap(name)
+            print(f"unwrapped name:{name}")
             _id = self.named_instances[name]
+            print(f"id of named instance:{_id}")
             assert _id in self.instances, f"registered named instance does not exist in instance table ({name})"
             return _id
 
@@ -307,7 +323,9 @@ class AsyncPyInterpreter:
             return item in self.instances
 
     async def contains(self, item: Union[str, uuid.UUID]) -> bool:
+        print(f"contains check before lock")
         async with self.lock:
+            print(f"contains check after lock")
             if isinstance(item, str):
                 return item in self.named_instances
             if isinstance(item, uuid.UUID):
