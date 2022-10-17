@@ -2,6 +2,7 @@ import asyncio
 import socket
 import traceback
 import uuid
+from asyncio import Lock
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -13,6 +14,8 @@ from ray.actor import ActorHandle
 from ray.util.queue import Queue
 from bidict import bidict
 
+class MyStopIteration(RuntimeError):
+    pass
 
 @dataclass
 class AsyncPyInterpreter:
@@ -21,6 +24,7 @@ class AsyncPyInterpreter:
     ref_counts: dict = field(
         default_factory=lambda: defaultdict(int))  # todo ref_counts is not reliable at this moment.
     named_instances: bidict = field(default_factory=bidict)  # mapping from name to id and vice versa.
+    lock: Lock = field(default_factory=Lock)
 
     def __post_init__(self):
         self.host = socket.gethostname()
@@ -28,17 +32,18 @@ class AsyncPyInterpreter:
 
     async def reset(self):
         from loguru import logger
-        logger.info(f"resetting interpreter. only named variables are kept.")
-        prev_instances = self.instances
-        tmp = self.named_instances
+        async with self.lock:
+            logger.info(f"resetting interpreter. only named variables are kept.")
+            prev_instances = self.instances
+            tmp = self.named_instances
 
-        self.instances = dict()
-        self.ref_counts = defaultdict(int)
-        self.named_instances = bidict()
-        for name, _id in tmp.items():
-            await self.put_named(prev_instances[_id], name)
-        logger.info(f"reset done:\n{self.status()}")
-        logger.info(f"self.named_instances:{self.named_instances}")
+            self.instances = dict()
+            self.ref_counts = defaultdict(int)
+            self.named_instances = bidict()
+            for name, _id in tmp.items():
+                await self._put_named_without_lock(prev_instances[_id], name)
+            logger.info(f"reset done:\n{self.status()}")
+            logger.info(f"self.named_instances:{self.named_instances}")
 
     async def get_kind(self):
         return "PyInterpreter"
@@ -50,7 +55,7 @@ class AsyncPyInterpreter:
         return self.env_id
 
     async def run(self, func: Callable, args=None, kwargs=None):
-        return self.run_with_proxy(func, args, kwargs)
+        return await self.run_with_proxy(func, args, kwargs)
 
     async def _unwrap(self, proxy: "RemoteProxy"):
         from ray_proxy.remote_proxy import Var
@@ -58,7 +63,7 @@ class AsyncPyInterpreter:
             # unwrap if the proxy lives in this environment
             from loguru import logger
             assert isinstance(proxy.env.id, ObjectRef), f"proxy.env.id is not a reference:{type(proxy.env.id)}"
-            eid = await ray.get(proxy.env.id)
+            eid = await proxy.env.id
             if self.env_id == eid:
                 return self.instances[ray.get(proxy.id)]
             else:
@@ -84,12 +89,17 @@ class AsyncPyInterpreter:
         return args, kwargs
 
     async def run_with_proxy(self, func: Callable, args=None, kwargs=None):
-        args, kwargs = await self._unwrap_inputs(args, kwargs)
-        func = await self._unwrap(func)
-        res = func(*args, **kwargs)  # hmm since this function call blocks, there is no way we can await..
-        return self.register(res)
+        async with self.lock:
+            args, kwargs = await self._unwrap_inputs(args, kwargs)
+            func = await self._unwrap(func)
+            res = func(*args, **kwargs)  # hmm since this function call blocks, there is no way we can await..
+            return await self._register_without_lock(res)
 
     async def register(self, instance):
+        async with self.lock:  # we need a lock here.todo take care of reentrant.
+            return await self._register_without_lock(instance)
+
+    async def _register_without_lock(self, instance):
         instance = await self._unwrap(instance)
         import uuid
         uuid = uuid.uuid4()
@@ -141,116 +151,123 @@ class AsyncPyInterpreter:
         return "decr_ref_success"
 
     async def call_id(self, id, args, kwargs):
-        args, kwargs = await self._unwrap_inputs(args, kwargs)
-        res = self.instances[id](*args, **kwargs)
-        return await self.register(res)
+        async with self.lock:
+            args, kwargs = await self._unwrap_inputs(args, kwargs)
+            res = self.instances[id](*args, **kwargs)
+            await self._register_without_lock(res)
 
     async def call_method_id(self, id, method, args, kwargs):
-        args, kwargs = await self._unwrap_inputs(args, kwargs)
-        res = getattr(self.instances[id], method)(*args, **kwargs)
-        return await self.register(res)
+        async with self.lock:
+            args, kwargs = await self._unwrap_inputs(args, kwargs)
+            res = getattr(self.instances[id], method)(*args, **kwargs)
+            return await self._register_without_lock(res)
 
     async def call_operator_id(self, id, operator, args):
         """returns id or NotImplemented"""
-        args, kwargs = await self._unwrap_inputs(args=args, kwargs=None)
-        res = getattr(self.instances[id], operator)(*args)
-        if res is NotImplemented:
-            return res
-        else:
-            return await self.register(res)
+        async with self.lock:
+            args, kwargs = await self._unwrap_inputs(args=args, kwargs=None)
+            res = getattr(self.instances[id], operator)(*args)
+            if res is NotImplemented:
+                return res
+            else:
+                return await self._register_without_lock(res)
 
     async def call_id_with_not_implemented(self, id, args, kwargs):
-        args, kwargs = await self._unwrap_inputs(args, kwargs)
-        res = self.instances[id](*args, **kwargs)
-        if res is NotImplemented:
-            return res
-        else:
-            return await self.register(res)
+        async with self.lock:
+            args, kwargs = await self._unwrap_inputs(args, kwargs)
+            res = self.instances[id](*args, **kwargs)
+            if res is NotImplemented:
+                return res
+            else:
+                return await self._register_without_lock(res)
 
     async def fetch_id(self, id):
-        return self.instances[id]
+        async with self.lock:
+            return self.instances[id]
 
     async def attr_of_id(self, id, attr: str):
-        return await self.register(getattr(self.instances[id], attr))
+        async with self.lock:
+            return await self._register_without_lock(getattr(self.instances[id], attr))
 
     async def setattr_of_id(self, id, attr: str, value: Any):
-        attr = await self._unwrap(attr)
-        value = await self._unwrap(value)
-        tgt = self.instances[id]
-        setattr(tgt, attr, value)
+        async with self.lock:
+            attr = await self._unwrap(attr)
+            value = await self._unwrap(value)
+            tgt = self.instances[id]
+            setattr(tgt, attr, value)
 
     async def getitem_of_id(self, id, item):
-        item = await self._unwrap(item)
-        return await self.register(self.instances[id][item])
+        async with self.lock:
+            item = await self._unwrap(item)
+            return await self._register_without_lock(self.instances[id][item])
 
     async def setitem_of_id(self, id, item, value):
-        item, value = await self._unwrap((item,value))
-        self.instances[id][item] = value
-        return await self.register(None)
+        async with self.lock:
+            item, value = await self._unwrap((item, value))
+            self.instances[id][item] = value
+            return await self._register_without_lock(None)
 
     async def dir_of_id(self, id):
-        res = dir(self.instances[id])
-        return res
+        async with self.lock:
+            res = dir(self.instances[id])
+            return res
 
     async def copy_of_id(self, id):
-        item = self.instances[id]
-        return await self.register(item)
-
-    async def run_generator(self, id, stop_signal: ActorHandle, receiver: Queue):
-        from loguru import logger
-        last_check = datetime.now()
-        check_period = timedelta(seconds=1)
-        # should I make this async? idk...
-
-        try:
-            for i, item in enumerate(self.instances[id]):
-                now = datetime.now()
-                dt = now - last_check
-                if dt > check_period:
-                    if await stop_signal.get.remote():
-                        break
-                receiver.put((i, item))
-                last_check = now
-            receiver.put((None, None))
-        except Exception as e:
-            logger.error(f"generator error in remote env: {e}")
-            logger.error(f"{traceback.format_exc()}")
-            receiver.put(("error", e))
+        async with self.lock:
+            item = self.instances[id]
+            return await self._register_without_lock(item)
 
     async def type(self, id):
-        return type(self.instances[id])
+        async with self.lock:
+            return type(self.instances[id])
 
     async def func_on_id(self, id, function: Callable) -> uuid.UUID:
-        return await self.register(function(self.instances[id]))
+        async with self.lock:
+            return await self._register_without_lock(function(self.instances[id]))
 
     async def next_of_id(self, id) -> uuid.UUID:
-        return await self.register(next(self.instances[id]))
+        # you cannot
+        async with self.lock:
+            # hmm, raising StopIteration from async function is a RuntimeError
+            # so we must catch it and... raise something else instead.
+            try:
+                thing = next(self.instances[id])
+                return await self._register_without_lock(thing)
+            except StopIteration:
+                raise MyStopIteration()
+
 
     async def iter_of_id(self, id) -> uuid.UUID:
-        return await self.register(iter(self.instances[id]))
+        async with self.lock:
+            return await self._register_without_lock(iter(self.instances[id]))
 
     def __repr__(self):
         return f"""Env@{self.host}(id={str(self.env_id)[:5]}...,{len(self.instances)} instances)"""
 
     async def status(self):
-        res = []
-        for k in self.instances.keys():
-            res.append(dict(
-                key=k,
-                type=type(self.instances[k]),
-                refs=self.ref_counts[k]
-            ))
+        async with self.lock:
+            res = []
+            for k in self.instances.keys():
+                res.append(dict(
+                    key=k,
+                    type=type(self.instances[k]),
+                    refs=self.ref_counts[k]
+                ))
         return res
 
     async def put_named(self, item, name: str):
+        async with self.lock:
+            return await self._put_named_without_lock(item, name)
+
+    async def _put_named_without_lock(self, item, name):
         from loguru import logger
-        name,item = await self._unwrap((name,item))
+        name, item = await self._unwrap((name, item))
         assert isinstance(name, str)
         if name in self.named_instances:
             from loguru import logger
             logger.warning(f"replacing named instance:{name}")
             await self.del_named(name)
-        _id = await self.register(item)
+        _id = await self._register_without_lock(item)
         self.named_instances[name] = _id
         logger.warning(f"placed named instance:{name}")
         await self.incr_ref_id(_id)  # increment reference from this env.
@@ -258,26 +275,40 @@ class AsyncPyInterpreter:
 
     async def del_named(self, item):
         from loguru import logger
-        logger.warning(f"deleting named instance:{item}")
-        item = await self._unwrap(item)
-        _id = self.named_instances[item]
-        del self.named_instances[item]
+        async with self.lock:
+            logger.warning(f"deleting named instance:{item}")
+            item = await self._unwrap(item)
+            _id = self.named_instances[item]
+            del self.named_instances[item]
+            # hmm, without lock,
+            # this can lead to removing the reference count
+            # even thouth some one might be trying to reference it?
         await self.decr_ref_id(_id)
 
     async def get_named(self, name: str):
-        name = await self._unwrap(name)
-        _id = self.named_instances[name]
-        assert _id in self.instances, f"registered named instance does not exist in instance table ({name})"
-        return _id
+        async with self.lock:
+            name = await self._unwrap(name)
+            _id = self.named_instances[name]
+            assert _id in self.instances, f"registered named instance does not exist in instance table ({name})"
+            return _id
 
     async def get_named_instances(self):
-        return {k: _id for k, _id in self.named_instances.items()}
+        async with self.lock:
+            return {k: _id for k, _id in self.named_instances.items()}
 
     async def get_instance_names(self):
-        return list(self.named_instances.keys())
+        async with self.lock:
+            return list(self.named_instances.keys())
 
     def __contains__(self, item: Union[str, uuid.UUID]):
         if isinstance(item, str):
             return item in self.named_instances
         if isinstance(item, uuid.UUID):
             return item in self.instances
+
+    async def contains(self, item: Union[str, uuid.UUID]) -> bool:
+        async with self.lock:
+            if isinstance(item, str):
+                return item in self.named_instances
+            if isinstance(item, uuid.UUID):
+                return item in self.instances

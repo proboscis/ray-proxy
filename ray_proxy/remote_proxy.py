@@ -8,6 +8,7 @@ from ray.actor import ActorHandle
 from ray.exceptions import RayTaskError
 from ray.util.queue import Queue
 
+from ray_proxy.async_interpreter import MyStopIteration
 from ray_proxy.interface import IRemoteInterpreter
 
 T = TypeVar("T")
@@ -251,6 +252,8 @@ class RemoteBlockingIterator:
         except RayTaskError as e:
             if isinstance(e.cause, StopIteration):
                 raise e.cause
+            if isinstance(e.cause, MyStopIteration):
+                raise StopIteration()
             else:
                 raise e
 

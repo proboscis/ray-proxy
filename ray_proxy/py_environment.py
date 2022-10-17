@@ -280,3 +280,6 @@ class PyInterpreter:
             return item in self.named_instances
         if isinstance(item, uuid.UUID):
             return item in self.instances
+
+    def contains(self, item: Union[str, uuid.UUID]):
+        return item in self

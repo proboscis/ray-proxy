@@ -8,6 +8,7 @@ from ray.actor import ActorHandle
 from ray.util.client.common import ClientActorHandle
 from returns.result import safe, Result
 
+from ray_proxy.async_interpreter import AsyncPyInterpreter
 from ray_proxy.interface import IRemoteInterpreter
 from ray_proxy.py_environment import PyInterpreter
 from ray_proxy.remote_proxy import Var, RemoteBlockingIterator
@@ -161,7 +162,7 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
         return ray.get(self.remote_env.get_instance_names.remote())
 
     def __contains__(self, item: Union[str, UUID, ObjectRef]) -> bool:
-        return ray.get(self.remote_env.__contains__.remote(item))
+        return ray.get(self.remote_env.contains.remote(item))
 
 
 @dataclass
@@ -169,7 +170,8 @@ class RemoteInterpreterFactory:
     ray: "ray"
 
     def create(self, **options) -> IRemoteInterpreter:
-        actor = self.ray.remote(PyInterpreter).options(**options).remote()
+        #actor = self.ray.remote(PyInterpreter).options(**options).remote()
+        actor = self.ray.remote(AsyncPyInterpreter).options(**options).remote()
         return ActorRefRemoteInterpreter(actor)
 
     def get(self, name) -> IRemoteInterpreter:

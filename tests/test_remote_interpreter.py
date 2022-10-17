@@ -40,6 +40,7 @@ def test_remote_env_run():
     assert isinstance(x, Var)
     assert isinstance(y, Var)
     assert isinstance(f(x), Var)
+    print(f(x))
     assert f(x) == "hello"
     assert env.run(lambda x, y: x + " " + y, args=(x, y)).fetch() == "hello world"
     assert x + " " + y == "hello world"
