@@ -67,14 +67,7 @@ class Var(Generic[T]):
     def __str__(self):
         _str: Var = self.env.func_on_id(self.id, str)  # this returns proxy
         host = self.env.get_host()
-        print(f"trying to get host")
-        host = ray.get(host)
-        print(f"trying to get repr")
-        _repr = ray.get(_str.fetch_ref())
-        print(f"trying to get env id")
-        _id = ray.get(self.env.id)
-
-        #host, _repr, _id = ray.get([host, _str.fetch_ref(), self.env.id])
+        host, _repr, _id = ray.get([host, _str.fetch_ref(), self.env.id])
         # Var@zeus[abcde]:hello world
         return f"Var@{host}[{str(_id)[:5]}]:{_repr}"
 

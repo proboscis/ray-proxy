@@ -12,6 +12,8 @@ from ray.actor import ActorHandle
 from ray.util.queue import Queue
 from bidict import bidict
 
+from ray_proxy.prepared import PreparedRef
+
 
 @dataclass
 class PyInterpreter:
@@ -60,14 +62,16 @@ class PyInterpreter:
             # we need to stop calling ray.get here.
             from loguru import logger
             assert isinstance(proxy.env.id, ObjectRef), f"proxy.env.id is not a reference:{type(proxy.env.id)}"
-            eid = ray.get(proxy.env.id) # this fine since no actor is involved
+            eid = ray.get(proxy.env.id)  # this fine since no actor is involved
             if self.env_id == eid:
                 return self.instances[ray.get(proxy.id)]
             else:
                 logger.warning(f"fetching from a proxy which lives in different env:{eid}")
-                # we need to release the lock here to respond to the other request, trying to fetch from this env.
-
-                return proxy.fetch() #this, can cause a deadlock
+                raise RuntimeError("cross interface variable passing is forbidden since this causes a deadlock.")
+                # this error should never be raised. extra care needs to be taken in the ActoRefRemoteInterpreter class.
+                # return proxy.fetch()  # this, can cause a deadlock
+        if isinstance(proxy, PreparedRef):  # this does not cause deadlock since the value is already uploaded.
+            return proxy.fetch()
         if isinstance(proxy, tuple):
             return tuple(self._unwrap(item) for item in proxy)
         if isinstance(proxy, list):
@@ -288,3 +292,10 @@ class PyInterpreter:
 
     def contains(self, item: Union[str, uuid.UUID]):
         return item in self
+
+    def publish_id(self, id) -> ObjectRef:
+        """publish the object associated with this id to object store.
+        this makes it possible for user to retrieve the data without deadlock.
+        """
+        data = self.instances[id]
+        return ray.put(data)
