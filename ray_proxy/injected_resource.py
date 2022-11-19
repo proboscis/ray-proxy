@@ -1,6 +1,6 @@
 from asyncio import Future
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Generic, Union, Optional, Callable, Awaitable, TypeVar
 
 from pinject_design import Injected
@@ -17,6 +17,7 @@ class InjectedResource(Generic[T]):
     scope: Union[str, ResourceScope]  # add n_issuable functionality to scope
     num_issuable: int
     destructor: Optional[Callable[[T], None]] = field(default=None)
+    health_checker:Optional[Callable[[T], bool]] = field(default=None)
 
     @property
     def proxy(self):
@@ -27,11 +28,7 @@ class InjectedResource(Generic[T]):
                  num_issuable: int = None):
         scope = scope or self.scope
         num_issuable = self.num_issuable if num_issuable is None else num_issuable
-        return InjectedResource(
-            factory=self.factory,
-            scope=scope,
-            num_issuable=num_issuable,
-        )
+        return replace(self,scope=scope,num_issuable=num_issuable)
 
     def map(self, f):
         return INJECTED_RESOURCE_APPLICATIVE.map(self, f)
@@ -56,17 +53,14 @@ class InjectedResource(Generic[T]):
 class InjectedResourceApplicative(Applicative[InjectedResource]):
 
     def map(self, target: InjectedResource, f) -> InjectedResource:
-        return InjectedResource(
-            target.factory.map(f),
-            target.scope,
-            target.num_issuable
-        )
+        return replace(target,factory=target.factory.map(f),health_checker=None)
 
     def zip(self, *targets: InjectedResource):
         return InjectedResource(
             Injected.mzip(*(t.factory for t in targets)),
             targets[0].scope,
-            targets[0].num_issuable
+            targets[0].num_issuable,
+            health_checker=None
         )
 
     def pure(self, item) -> InjectedResource:

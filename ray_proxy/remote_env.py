@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
+from multiprocessing.pool import ThreadPool
 from typing import TypeVar, Union, List, Dict
 from uuid import UUID
 
@@ -22,21 +23,20 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
     remote_env_id_ref: ObjectRef = field(default=None)
     remote_env_id: UUID = field(default=None)
 
-    async def _async_prep(self, x):
+    def _blocking_prep(self, x):
         match x:
             case list():
-                return list(await asyncio.gather(*(self._async_prep(i) for i in x)))
+                return [self._blocking_prep(y) for y in x]
             case tuple():
-                return tuple(await asyncio.gather(*(self._async_prep(i) for i in x)))
+                return tuple(self._blocking_prep(y) for y in x)
             case dict():
-                keys = self._async_prep(list(x.keys()))
-                values = self._async_prep(list(x.values()))
-                keys, values = await asyncio.gather(keys, values)
+                keys = self._blocking_prep(list(x.keys()))
+                values = self._blocking_prep(list(x.values()))
                 return {k: v for k, v in zip(keys, values)}
             case Var() as v if v.env.id != self.remote_env_id_ref:
                 ref = v.env.publish_id(v.id)
                 print(f"waiting for publish")
-                published = await ref
+                published = ray.get(ref)
                 print(f"published!")
                 return PreparedRef(published)
             case Var() as v if v.env.id == self.remote_env_id_ref:
@@ -45,7 +45,7 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
                 return o
 
     def _prepare(self, x):
-        return asyncio.run(self._async_prep(x))
+        return self._blocking_prep(x)
 
     def __post_init__(self):
         if self.remote_env_id_ref is None:
@@ -206,6 +206,9 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
     def __contains__(self, item: Union[str, UUID, ObjectRef]) -> bool:
         item = self._prepare(item)
         return ray.get(self.remote_env.contains.remote(item))
+
+    def destroy(self):
+        ray.kill(self.remote_env)
 
 
 @dataclass

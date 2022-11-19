@@ -10,17 +10,17 @@ from ray.util.queue import Queue
 
 from ray_proxy.async_interpreter import MyStopIteration
 from ray_proxy.interface import IRemoteInterpreter
+from ray_proxy.var_interface import IVar
 
 T = TypeVar("T")
 
 
 @dataclass
-class Var(Generic[T]):
+class Var(Generic[T], IVar):
     """
     a proxy class that represents a variable which lives in the remote python interpreter.
     this, can be copied and used from multiple remote places if I implemnt the corrent reference counting mechanism!
     until then only one process can use this.
-    todo implement an reference counting actor. which can just live in remote environment.
     then call its incr/decr upon creating/deleting this instance
     when you send thie proxy to another, call incr() un receiving side.
     """
@@ -38,13 +38,13 @@ class Var(Generic[T]):
         # this is required because the __del__ is called
         # after the imported modules are destroyed on interpreter shutdown.
         if not self.released:
-            #oid = ray.get(self.id)
+            # oid = ray.get(self.id)
             # print(f"deleting |{id(self)}| {self}")
             print(f"sending release request for {self.id} in __atexit__")
             self.env.decr_ref(self.id)
             print(f"sent release request for {self.id}")
             self.released = True
-            #print(f"released:{self.released}")
+            # print(f"released:{self.released}")
 
     def __del__(self):
         # print(f"dereferencing")
@@ -221,16 +221,34 @@ class Var(Generic[T]):
     def __len__(self):
         return self.___call_operator___("__len__").fetch()
 
+    def __lt__(self, other):
+        return self.___call_left_operator___("__lt__", other)
+
+    def __le__(self, other):
+        return self.___call_left_operator___("__le__", other)
+
+    def __ge__(self, other):
+        return self.___call_left_operator___("__ge__", other)
+
+    def __gt__(self, other):
+        return self.___call_left_operator___("__gt__", other)
+
+    def __ne__(self, other):
+        return self.___call_left_operator___("__ne__", other)
+
+    def __neg__(self, other):
+        return self.___call_left_operator___("__neg__", other)
+
+    def __await__(self):
+        return self.fetch_ref().__await__()
+
 
 def rp_deserializer(state):
-    print(f"deserializing Var")
     rp = Var(state[0], state[1])
-    print(f"reconstructed Var:|{id(rp)}|")
     return rp
 
 
 def rp_serializer(rp: Var):
-    print(f"serializing Var:|{id(rp)}")
     rp.env.incr_ref(rp.id)
     return rp.env, rp.id
 

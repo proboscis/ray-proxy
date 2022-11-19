@@ -180,3 +180,7 @@ class IRemoteInterpreter(metaclass=ABCMeta):
     @abstractmethod
     def publish_id(self,id)->ObjectRef:
         pass
+
+    @abstractmethod
+    def destroy(self):
+        pass

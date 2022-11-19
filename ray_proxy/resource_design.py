@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field, replace
 from typing import Dict, Union, TypeVar
 
+import frozendict
 from bidict import bidict
+from diffusers.configuration_utils import FrozenDict
 
 from pinject_design import Injected
 from pinject_design.di.app_injected import EvaledInjected
@@ -14,8 +16,25 @@ T = TypeVar("T")
 
 
 @dataclass
+class ResourcePrioritizer:
+    targets: Dict[FrozenDict[str, int], int] = field(default_factory=dict)
+
+    def __call__(self, req: Dict[str, int]):
+        q = frozendict.frozendict(req)
+        return self.targets.get(q, 0)
+
+    def add_priority(self, q: Dict[str, int], priority: int):
+        targets = {frozendict.frozendict(q): priority}
+        return self + ResourcePrioritizer(targets)
+
+    def __add__(self, other: "ResourcePrioritizer") -> "ResourcePrioritizer":
+        return ResourcePrioritizer({**self.targets, **other.targets})
+
+
+@dataclass
 class ResourceDesign:
     resources: Dict[str, InjectedResource] = field(default_factory=dict)
+    prioritizer: ResourcePrioritizer = field(default_factory=ResourcePrioritizer)
 
     def __post_init__(self):
         self.key_to_id_bidict = bidict({k: id(v.factory) for k, v in self.resources.items()})
@@ -70,11 +89,12 @@ class ResourceDesign:
 
     def __add__(self, other: "ResourceDesign") -> "ResourceDesign":
         return ResourceDesign(
-            {**self.resources, **other.resources}
+            {**self.resources, **other.resources},
+            prioritizer=self.prioritizer + other.prioritizer
         )
 
-    def to_scheduler(self)->"ResourceSchedulerClient":
-        from ray_proxy.resource_scheduler import ResourceSchedulerClient
+    def to_scheduler(self) -> "ResourceSchedulerClient":
+        from ray_proxy.resource_scheduler_client import ResourceSchedulerClient
         sch = ResourceSchedulerClient.create(self)
         return sch
 
@@ -89,3 +109,6 @@ class ResourceDesign:
         for k, scope in kwargs.items():
             overrides[k] = replace(self.resources[k], scope=scope)
         return self + ResourceDesign(overrides)
+
+    def add_priority(self, request: Dict[str, int], priority: int) -> "ResourceDesign":
+        return self + ResourceDesign(prioritizer=ResourcePrioritizer().add_priority(request, priority))

@@ -8,13 +8,13 @@ import ray
 from pinject_design import Injected
 from ray_proxy.resource_design import ResourceDesign
 from ray_proxy.injected_resource import InjectedResource
-from ray_proxy.resource_scheduler import ResourceSchedulerClient
+from ray_proxy.resource_scheduler_client import ResourceSchedulerClient
 
 design = ResourceDesign().bind_provider(
     x=InjectedResource(Injected.pure("x"), "reserved", 100),
     y=InjectedResource(Injected.pure("y"), "reserved", 100),
     z=InjectedResource(Injected.by_name("x").zip(Injected.by_name("y")), "reserved", 100),
-    t = InjectedResource(Injected.by_name("z"), "ondemand",10)
+    t=InjectedResource(Injected.by_name("z"), "ondemand", 10)
 )
 
 
@@ -50,36 +50,39 @@ def test_errorneous_resource():
     print(sch.status())
 
 
-
-
 def test_get_resource():
     bsch = design.to_scheduler()
 
     # although this code makes very heavy use of schduler...
     with bsch["x":2, "y"] as ((x1, x2), y):
         print(x1, x2, y)
-        assert (x1,x2,y) == ("x","x","y")
-    with bsch["x":2] as (x1,x2):
-        print(x1,x2)
-        assert (x1,x2) == ("x","x")
+        assert (x1, x2, y) == ("x", "x", "y")
+    with bsch["x":2] as (x1, x2):
+        print(x1, x2)
+        assert (x1, x2) == ("x", "x")
     with bsch["x"] as x:
         print(x)
         assert x == "x"
 
+
 def test_in_use_count():
     sch = design.to_scheduler()
+
     @ray.remote
     def task():
         with sch["z"] as z:
             print(sch.status())
             print(z)
         print(sch.status())
+
     ray.get([task.remote() for i in range(10)])
     print(sch.status())
+
 
 def test_scheduling_speed():
     sch = design.override_issuable(z=2).to_scheduler()
     start = datetime.now()
+
     @ray.remote
     def task():
         from loguru import logger
@@ -90,15 +93,18 @@ def test_scheduling_speed():
             time.sleep(3)
             logger.info(f"task {tid} freed {z}")
         logger.info(f"task {tid} finished")
+
     ray.get([task.remote() for i in range(10)])
     end = datetime.now()
     dt = end - start
     print(dt)
-    assert dt <= pd.Timedelta("20 seconds"),dt
+    assert dt <= pd.Timedelta("20 seconds"), dt
     print(sch.status())
+
 
 def test_long_running_tasks():
     sch = design.override_issuable(z=6).to_scheduler()
+
     @ray.remote
     def task(index):
         print(f"task {index} waiting for resource")
@@ -112,6 +118,26 @@ def test_long_running_tasks():
             print(f"task {index} trying to release {z}")
         print(f"task {index} released {z} and {t}")
         return index
+
     ray.get([task.remote(i) for i in range(100)])
     print(sch.status())
 
+
+def test_changing_max_issuable():
+    sch = design.to_scheduler()
+    print(sch.status())
+    with sch["x":10, "y":10, "z":10] as (xs, ys, zs):
+        print(xs, ys, zs)
+    print(sch.status())
+    sch.set_max_issuables(x=5, y=5, z=5)
+    print(sch.status())
+
+
+def test_discard_on_condition():
+    sch = design.to_scheduler()
+    print(sch.status())
+    with sch["x":10,"z":10] as (xs,zs):
+        print(len(xs))
+    for i in range(5):
+        sch.discard_on_condition("z",lambda x:True)
+    print(sch.status())

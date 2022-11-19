@@ -173,3 +173,8 @@ class IRemoteInterpreter(metaclass=ABCMeta):
     def __contains__(self, item: Union[str, UUID]):
         """returns True if item is in this interpreter"""
         pass
+
+    @abstractmethod
+    def destroy(self):
+        pass
+

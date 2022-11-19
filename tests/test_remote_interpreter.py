@@ -31,6 +31,27 @@ def test_bool():
     assert flag == True
 
 
+def test_lt():
+    e = get_interpreter()
+    x = e.put(10)
+    assert x < 20
+    assert not (x < 10)
+    assert x <= 20
+    assert x <= 10
+    assert 10 <= x
+    assert (x <= 10)
+    assert not (x < 10)
+    assert 8 < x
+def test_gt():
+    e = get_interpreter()
+    x = e.put(10)
+    assert x > 0
+    assert x >= 10
+    assert x > 9
+    assert not (x > 10)
+
+
+
 def test_remote_generator():
     env = get_interpreter()
     assert [i.fetch() for i in env.put(range(10))] == list(range(10))
@@ -133,6 +154,7 @@ async def wait_task(task):
 class B:
     def __init__(self):
         self.lock = Lock()
+
     async def a(self, x):
         async with self.lock:
             print("a")
@@ -163,8 +185,8 @@ def test_put_named():
     # rstr = env.put(str)
     # x = env.put("hello")
     # y = rstr(x)
-    #env["x"] = "hello"
-    env.put_named("x",0)
+    # env["x"] = "hello"
+    env.put_named("x", 0)
     # x = env["x"]
     # print(x)
     # for some reason this containes_check is executed before the execution of
@@ -181,3 +203,11 @@ def test_put_named():
     # but this means that we need to sync the state of name_id manager.
     # since we don't often use named_put, I think it is safe to make the put_named as blocking
 
+def test_async_fetch():
+    env= get_interpreter()
+    x = env.put("hello")
+    async def test_await():
+        return await x
+
+    awaited = asyncio.run(test_await())
+    assert awaited == "hello"

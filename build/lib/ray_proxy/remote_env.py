@@ -15,6 +15,7 @@ from ray_proxy.remote_proxy import Var, RemoteBlockingIterator
 
 @dataclass
 class ActorRefRemoteInterpreter(IRemoteInterpreter):
+
     remote_env: ActorHandle
     remote_env_refs: ActorHandle = field(default=None)
     remote_env_id_ref: ObjectRef = field(default=None)
@@ -159,6 +160,13 @@ class ActorRefRemoteInterpreter(IRemoteInterpreter):
 
     def __contains__(self, item: Union[str, UUID, ObjectRef]) -> bool:
         return ray.get(self.remote_env.__contains__.remote(item))
+
+    def setitem_id(self, id, item, value):
+        pass
+
+    def publish_id(self, id) -> ObjectRef:
+        pass
+
 
 
 @dataclass
